@@ -1,0 +1,55 @@
+# Build and binary folders
+bin/
+obj/
+out/
+dist/
+build/
+
+# IDE and Editor
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS and Tool files
+.DS_Store
+Thumbs.db
+.nuget/
+.local/
+.dotnet/
+Library/
+
+# Superpowers and SDD
+.superpowers/
+.worktrees/
+worktrees/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+*.egg-info/
+
+# Test and coverage
+TestResults/
+coverage/
+
+# Docker local data
+deploy/docker/data/
+
+# Confidential documentation, plans, tests, and infra (pure code repository filter)
+docs/
+tests/
+deploy/
+tools/
+*.docx
+DESIGN*.md
+*agent*.md
+*.log
+

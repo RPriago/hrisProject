@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Kernel\PeopleFlow.Kernel.csproj" />
+    <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.MultiTenancy\PeopleFlow.MultiTenancy.csproj" />
+    <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Persistence\PeopleFlow.Persistence.csproj" />
+    <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Security\PeopleFlow.Security.csproj" />
+    <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Storage\PeopleFlow.Storage.csproj" />
+    <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Jobs\PeopleFlow.Jobs.csproj" />
+  </ItemGroup>
+
+</Project>

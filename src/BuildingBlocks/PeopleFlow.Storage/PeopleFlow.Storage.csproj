@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PeopleFlow.Kernel\PeopleFlow.Kernel.csproj" />
+    <ProjectReference Include="..\PeopleFlow.Persistence\PeopleFlow.Persistence.csproj" />
+    <ProjectReference Include="..\PeopleFlow.Jobs\PeopleFlow.Jobs.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="3.7.400" />
+  </ItemGroup>
+
+</Project>
