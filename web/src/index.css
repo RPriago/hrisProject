@@ -1,0 +1,167 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+:root {
+  /* === 1. PERMUKAAN ARSITEKTURAL HERO (DARK FOYER) === */
+  --bg-hero-base: #1F2227;
+  --bg-hero-slate: #353D43;
+  --bg-hero-pill: rgba(255, 255, 255, 0.14);
+  --bg-hero-pill-fallback: #42464B;
+  --border-hero-pill: rgba(255, 255, 255, 0.55);
+
+  /* === 2. PERMUKAAN GALERI TERANG (SECTIONS 2 - 7) === */
+  --bg-canvas: #FFFFFF;
+  --bg-surface-soft: #F7F7F7;
+  --bg-card-stage: #FAFAFA;
+  --bg-tab-track: #EEEEEE;
+
+  /* === 3. TINTA & TIPOGRAFI === */
+  --text-on-dark-primary: #FFFFFF;
+  --text-on-dark-muted: #E2E5E9;
+  --text-on-dark-placeholder: #D6D9DF;
+  --text-primary: #1E1E1E;
+  --text-secondary: #52565E;
+  --text-tertiary: #636872;
+
+  /* === 4. WARNA INTI KEDUA & KELUARGA AKSEN TUNGGAL === */
+  --color-navy-action: #0D1B39;
+  --color-navy-action-hover: #162B57;
+
+  --accent-amber-fill: #E58411;
+  --accent-amber-fill-hover: #D4760A;
+  --accent-amber-ink: #14171C;
+
+  --accent-amber-text: #9A4A06;
+  --accent-amber-text-hover: #7C3A04;
+  --accent-amber-rich: #B45309;
+
+  /* === 5. GARIS BATAS, BAYANGAN LANTAI HANGAT, & FOKUS === */
+  --border-subtle: #E4E6EB;
+  --border-interactive: #737882;
+  --focus-ring-on-light: #0D1B39;
+  --focus-ring-on-dark: #F59E0B;
+
+  --shadow-card-soft: 0 12px 32px rgba(30, 30, 30, 0.06);
+  --shadow-floating-control: 0 6px 18px rgba(13, 27, 57, 0.12);
+  --shadow-warm-floor: 0 28px 44px -14px rgba(154, 74, 6, 0.22);
+
+  /* === 6. WORKSPACE APP SHELL & DASHBOARD TOKENS === */
+  --dash-shell-bg: #FFFFFF;
+  --dash-canvas-well: #F5F6F8;
+  --dash-card-bg: #FFFFFF;
+  --dash-subcard-bg: #FAFAFB;
+  --dash-quota-card-bg: #F7F7F7;
+
+  --dash-text-primary: #1E1E1E;
+  --dash-text-secondary: #52565E;
+  --dash-text-muted: #636872;
+
+  --dash-nav-active-bg: linear-gradient(112deg, #16181D 0%, #1F2227 64%, #3B230C 100%);
+  --dash-nav-active-sheen: inset -10px -8px 20px rgba(229, 132, 17, 0.22);
+  --dash-nav-active-text: #FFFFFF;
+
+  --dash-navy-primary: #0D1B39;
+  --dash-amber-deep: #9A4A06;
+  --dash-amber-rich: #B45309;
+  --dash-amber-bright: #E58411;
+  --dash-amber-bright-ink: #14171C;
+
+  --dash-cta-tactile-bg: linear-gradient(180deg, #B45309 0%, #9A4A06 100%);
+  --dash-cta-tactile-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 4px 12px rgba(154, 74, 6, 0.20);
+
+  --chart-area-stroke: #9A4A06;
+  --chart-area-fill: linear-gradient(180deg, rgba(229, 132, 17, 0.20) 0%, rgba(229, 132, 17, 0.00) 100%);
+  --chart-bar-inactive: #F2F3F6;
+  --chart-bar-active: linear-gradient(180deg, #9A4A06 0%, #E58411 68%, rgba(229, 132, 17, 0.16) 100%);
+  --chart-seg-1: #0D1B39;
+  --chart-seg-2: #B45309;
+  --chart-seg-3: #F3F4F6;
+
+  --pill-delta-dark-bg: #1E1E1E;
+  --pill-delta-amber-bg: #FFEDD5;
+  --pill-delta-amber-text: #9A3412;
+  --pill-alert-rose-bg: #FEE2E2;
+  --pill-alert-rose-text: #991B1B;
+  --pill-ok-green-bg: #DCFCE7;
+  --pill-ok-green-text: #166534;
+  --pill-neutral-bg: #F3F4F6;
+  --pill-neutral-text: #374151;
+  --action-logout-text: #B42318;
+
+  --dash-border-card: #ECEEF2;
+  --dash-border-control: #737882;
+  --dash-shadow-card: 0 1px 3px rgba(16, 24, 40, 0.04);
+  --dash-shadow-tooltip: 0 10px 26px rgba(13, 27, 57, 0.12);
+  --dash-focus-ring: #0D1B39;
+}
+
+[data-theme="dark"] {
+  --bg-canvas: #121418;
+  --bg-surface-soft: #1A1D23;
+  --bg-card-stage: #20242C;
+  --bg-tab-track: #262B35;
+
+  --text-primary: #F3F4F6;
+  --text-secondary: #C4C9D4;
+  --text-tertiary: #A5ACBA;
+
+  --accent-amber-text: #F59E0B;
+  --color-navy-action: #E58411;
+  --focus-ring-on-light: #F59E0B;
+
+  --dash-shell-bg: #121418;
+  --dash-canvas-well: #0B0D10;
+  --dash-card-bg: #161920;
+  --dash-subcard-bg: #1D212A;
+  --dash-quota-card-bg: #1D212A;
+
+  --dash-text-primary: #F3F4F6;
+  --dash-text-secondary: #C4C9D4;
+  --dash-text-muted: #A5ACBA;
+
+  --dash-nav-active-bg: linear-gradient(112deg, #232732 0%, #3B230C 100%);
+  --chart-area-stroke: #F59E0B;
+  --chart-bar-inactive: #252A36;
+  --chart-bar-active: linear-gradient(180deg, #F59E0B 0%, #B45309 100%);
+  --dash-focus-ring: #F59E0B;
+}
+
+/* Global Tabular Numbers Rule */
+.tabular-nums,
+table,
+.stat-number,
+.kpi-figure,
+.badge-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Accessible Focus Visible Indicator */
+:focus-visible {
+  outline: 2px solid var(--focus-ring-on-light);
+  outline-offset: 2px;
+}
+
+.hero-dark :focus-visible {
+  outline: 2px solid var(--focus-ring-on-dark);
+  outline-offset: 2px;
+}
+
+/* Touch target minimum 44px */
+.touch-target {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}

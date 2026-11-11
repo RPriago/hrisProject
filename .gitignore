@@ -53,3 +53,27 @@ DESIGN*.md
 *agent*.md
 *.log
 
+# Frontend tests, media assets, non-README markdown, SQL, Docker, and sensitive config filters
+web/tests/
+web/public/
+*.md
+!README.md
+!readme.md
+*.sql
+*docker-compose*
+Dockerfile*
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.avif
+*.svg
+*.gif
+*.ico
+*.tsbuildinfo
