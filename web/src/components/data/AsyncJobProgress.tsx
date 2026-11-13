@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { apiClient } from '@/lib/api/apiClient';
+import { ApiClientError } from '@/lib/api/problemDetails';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { cn } from '@/lib/utils';
@@ -56,7 +57,7 @@ export function AsyncJobProgress({
 
     async function poll() {
       try {
-        const data = await apiClient.get<JobProgressDto>(`/api/v1/jobs/${jobId}`);
+        const data = await apiClient.get<JobProgressDto>(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
         if (!isMounted) return;
 
         setJob(data);
@@ -75,7 +76,18 @@ export function AsyncJobProgress({
         if (!isMounted) return;
         const msg = err instanceof Error ? err.message : 'Gagal memuat status tugas latar belakang';
         setError(msg);
-        // Retry polling even on error unless unmounted
+
+        const statusCode =
+          err instanceof ApiClientError
+            ? err.statusCode
+            : typeof err === 'object' && err !== null && 'statusCode' in err
+              ? Number((err as { statusCode?: unknown }).statusCode)
+              : undefined;
+
+        if (statusCode === 401 || statusCode === 403 || statusCode === 404) {
+          return; // Stop polling permanently on auth or missing resource errors
+        }
+
         timerId = setTimeout(poll, pollIntervalMs * 2);
       }
     }

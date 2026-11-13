@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json;
 using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Entities;
@@ -8,8 +7,8 @@ using PeopleFlow.Security.Redaction;
 namespace PeopleFlow.Persistence.Audit;
 
 /// <summary>
-/// Writes audit entries as outbox messages atomically within the active PeopleFlowDbContext transaction.
-/// Preserves caller correlationId, redacts sensitive keys/PII, and stages without autosave by default.
+/// Writes immutable, PII-redacted <see cref="AuditLogEntry"/> snapshots into the transactional Outbox.
+/// Honors <see cref="SensitiveDataAttribute"/> and key-based PII conventions to prevent secret persistence in audit trails.
 /// </summary>
 public sealed class OutboxAuditLogWriter : IAuditLogWriter
 {
@@ -31,8 +30,13 @@ public sealed class OutboxAuditLogWriter : IAuditLogWriter
 
         var sanitizedOldValues = SanitizeValues(entry.OldValues);
         var sanitizedNewValues = SanitizeValues(entry.NewValues);
+        var sanitizedReason = entry.Reason == null
+            ? null
+            : SensitiveDataRedactor.RedactSecretsFromText(entry.Reason);
+
         var sanitizedEntry = entry with
         {
+            Reason = sanitizedReason,
             OldValues = sanitizedOldValues,
             NewValues = sanitizedNewValues
         };
@@ -65,111 +69,13 @@ public sealed class OutboxAuditLogWriter : IAuditLogWriter
     }
 
     private static IReadOnlyDictionary<string, object?>? SanitizeValues(
-        IReadOnlyDictionary<string, object?>? values,
-        int depth = 0,
-        HashSet<object>? visited = null)
+        IReadOnlyDictionary<string, object?>? values)
     {
         if (values == null)
         {
             return null;
         }
 
-        var sanitized = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var (key, value) in values)
-        {
-            if (IsSensitiveKey(key))
-            {
-                sanitized[key] = "****";
-            }
-            else
-            {
-                sanitized[key] = SanitizeValue(value, depth, visited);
-            }
-        }
-
-        return sanitized;
+        return SensitiveDataRedactor.SanitizeObjectGraph(values) as IReadOnlyDictionary<string, object?>;
     }
-
-    private static object? SanitizeValue(object? value, int depth = 0, HashSet<object>? visited = null)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-
-        if (depth > 10)
-        {
-            return "[MAX_DEPTH]";
-        }
-
-        var type = value.GetType();
-
-        if (type.IsPrimitive || type.IsEnum || type == typeof(string) || type == typeof(decimal) ||
-            type == typeof(DateTime) || type == typeof(DateTimeOffset) || type == typeof(Guid) || type == typeof(TimeSpan))
-        {
-            return value;
-        }
-
-        if (SensitiveDataRedactor.TryEnumerateDictionary(value, out var entries))
-        {
-            var sanitized = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kv in entries)
-            {
-                sanitized[kv.Key] = IsSensitiveKey(kv.Key)
-                    ? SensitiveDataRedactor.Mask
-                    : SanitizeValue(kv.Value, depth + 1, visited);
-            }
-            return sanitized;
-        }
-
-        var typeSensitiveAttr = type.GetCustomAttribute<SensitiveDataAttribute>(inherit: true);
-        if (typeSensitiveAttr != null)
-        {
-            return typeSensitiveAttr.Mask;
-        }
-
-        if (value is System.Collections.IEnumerable enumerable)
-        {
-            var sanitizedList = new List<object?>();
-            foreach (var item in enumerable)
-            {
-                sanitizedList.Add(SanitizeValue(item, depth + 1, visited));
-            }
-            return sanitizedList;
-        }
-
-        visited ??= new HashSet<object>(ReferenceEqualityComparer.Instance);
-        if (!visited.Add(value))
-        {
-            return "[CIRCULAR_REFERENCE]";
-        }
-
-        var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
-            .ToArray();
-
-        var objDict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var prop in properties)
-        {
-            var sensitiveAttr = prop.GetCustomAttribute<SensitiveDataAttribute>(inherit: true);
-            if (sensitiveAttr != null)
-            {
-                objDict[prop.Name] = sensitiveAttr.Mask;
-            }
-            else if (IsSensitiveKey(prop.Name))
-            {
-                objDict[prop.Name] = "****";
-            }
-            else
-            {
-                var propVal = prop.GetValue(value);
-                objDict[prop.Name] = SanitizeValue(propVal, depth + 1, visited);
-            }
-        }
-
-        return objDict;
-    }
-
-    private static bool IsSensitiveKey(string key) => SensitiveDataRedactor.IsSensitiveName(key);
 }

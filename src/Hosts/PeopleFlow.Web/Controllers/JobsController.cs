@@ -43,7 +43,7 @@ public class JobsController : ControllerBase
             {
                 User = new AuthIdentity(_actorContext.UserId, _actorContext.IsAuthenticated, IsActive: true),
                 Tenant = tenantId.HasValue && tenantId.Value != Guid.Empty
-                    ? new TenantIdentity(tenantId.Value, IsMember: true, SubscriptionStatus: _tenantContextAccessor.SubscriptionStatus ?? "Active")
+                    ? new TenantIdentity(tenantId.Value, IsMember: true, SubscriptionStatus: _tenantContextAccessor.SubscriptionStatus ?? string.Empty)
                     : TenantIdentity.Empty,
                 Requirement = new ResourceRequirement(IsReadOperation: true)
             },
@@ -105,6 +105,34 @@ public class JobsController : ControllerBase
             problem.Extensions["code"] = "JOB_NOT_FOUND";
             problem.Extensions["correlationId"] = HttpContext.TraceIdentifier;
             return NotFound(problem);
+        }
+
+        var isOwner = run.InitiatedByUserId.HasValue &&
+                      _actorContext.UserId.HasValue &&
+                      run.InitiatedByUserId.Value == _actorContext.UserId.Value;
+        var isAdminOrReadAll = _actorContext.Roles.Contains("TenantAdmin", StringComparer.OrdinalIgnoreCase) ||
+                               _actorContext.Roles.Contains("SuperAdmin", StringComparer.OrdinalIgnoreCase) ||
+                               _actorContext.Roles.Contains("SystemAdmin", StringComparer.OrdinalIgnoreCase) ||
+                               _actorContext.Roles.Contains("HrAdmin", StringComparer.OrdinalIgnoreCase) ||
+                               _actorContext.Roles.Contains("Admin", StringComparer.OrdinalIgnoreCase) ||
+                               _actorContext.Roles.Contains("jobs:read_all", StringComparer.OrdinalIgnoreCase) ||
+                               User.HasClaim("permission", "jobs:read_all") ||
+                               User.HasClaim("permissions", "jobs:read_all");
+
+        if (!isOwner && !isAdminOrReadAll)
+        {
+            var forbidden = new ProblemDetails
+            {
+                Type = "https://httpstatuses.com/403",
+                Title = "Forbidden",
+                Status = StatusCodes.Status403Forbidden,
+                Detail = "You do not have permission to view this background job.",
+                Instance = HttpContext.Request.Path
+            };
+            forbidden.Extensions["code"] = "JOB_ACCESS_FORBIDDEN";
+            forbidden.Extensions["errorCode"] = "JOB_ACCESS_FORBIDDEN";
+            forbidden.Extensions["correlationId"] = HttpContext.TraceIdentifier;
+            return StatusCode(StatusCodes.Status403Forbidden, forbidden);
         }
 
         var processedItems = run.SucceededItems + run.FailedItems;

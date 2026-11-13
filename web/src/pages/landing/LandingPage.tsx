@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { IS_DEMO_MODE } from '@/lib/env';
 import { SkipLink } from '@/components/ui/SkipLink';
 import { Navbar } from '@/pages/landing/components/Navbar';
 import { HeroSection } from '@/pages/landing/sections/HeroSection';
@@ -23,11 +24,18 @@ export function LandingPage({ onNavigateToWorkspace }: LandingPageProps) {
   const [selectedDemoRole, setSelectedDemoRole] = useState<string | undefined>(undefined);
 
   const handleOpenDemoModal = (role?: string) => {
+    if (!IS_DEMO_MODE) {
+      if (typeof document !== 'undefined') {
+        document.getElementById('pricing')?.scrollIntoView?.({ behavior: 'smooth' });
+      }
+      return;
+    }
     setSelectedDemoRole(role);
     setIsDemoModalOpen(true);
   };
 
   const handleSelectRole = (role: string) => {
+    if (!IS_DEMO_MODE) return;
     setIsDemoModalOpen(false);
     onNavigateToWorkspace?.(role);
   };
@@ -76,13 +84,15 @@ export function LandingPage({ onNavigateToWorkspace }: LandingPageProps) {
       {/* Section 11: 4-Column SaaS Footer */}
       <FooterSection onOpenDemoModal={() => handleOpenDemoModal()} />
 
-      {/* Interactive Ready-to-Use Demo Role Modal (7 Roles) */}
-      <RoleDemoModal
-        isOpen={isDemoModalOpen}
-        onClose={() => setIsDemoModalOpen(false)}
-        onSelectRole={handleSelectRole}
-        initialRole={selectedDemoRole}
-      />
+      {/* Interactive Ready-to-Use Demo Role Modal (only mounted in explicit demo/test mode) */}
+      {IS_DEMO_MODE && (
+        <RoleDemoModal
+          isOpen={isDemoModalOpen}
+          onClose={() => setIsDemoModalOpen(false)}
+          onSelectRole={handleSelectRole}
+          initialRole={selectedDemoRole}
+        />
+      )}
     </div>
   );
 }

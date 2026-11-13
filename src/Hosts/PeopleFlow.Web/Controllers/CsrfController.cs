@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using PeopleFlow.Security.Authentication;
 using PeopleFlow.Security.Csrf;
 
@@ -19,6 +20,7 @@ public class CsrfController : ControllerBase
     }
 
     [HttpGet]
+    [EnableRateLimiting("auth-csrf")]
     public IActionResult GetCsrfToken()
     {
         if (!Request.Cookies.TryGetValue(SessionCookieConfig.CookieName, out var sessionId) ||

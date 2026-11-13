@@ -5,9 +5,12 @@ export interface CsrfResponse {
 }
 
 export class CsrfManager {
+  private static readonly VALID_HEADER_NAME = /^X-CSRF-[A-Za-z0-9-]+$/i;
   private cachedToken: string | null = null;
   private headerName: string = 'X-CSRF-Token';
   private inFlightPromise: Promise<string> | null = null;
+  private abortController: AbortController | null = null;
+  private epoch = 0;
 
   public async getToken(): Promise<string> {
     if (this.cachedToken) {
@@ -18,31 +21,47 @@ export class CsrfManager {
       return this.inFlightPromise;
     }
 
-    this.inFlightPromise = this.fetchFreshToken().finally(() => {
-      this.inFlightPromise = null;
+    const requestEpoch = this.epoch;
+    const promise = this.fetchFreshToken(requestEpoch).finally(() => {
+      if (this.inFlightPromise === promise) {
+        this.inFlightPromise = null;
+      }
     });
+    this.inFlightPromise = promise;
 
-    return this.inFlightPromise;
+    return promise;
   }
 
   public async refreshToken(): Promise<string> {
-    this.cachedToken = null;
+    this.clear();
     return this.getToken();
   }
 
   public clear(): void {
+    this.epoch += 1;
     this.cachedToken = null;
     this.inFlightPromise = null;
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
   }
 
   public getHeaderName(): string {
     return this.headerName;
   }
 
-  private async fetchFreshToken(): Promise<string> {
+  private async fetchFreshToken(requestEpoch: number): Promise<string> {
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    const controller = new AbortController();
+    this.abortController = controller;
+
     const res = await fetch('/api/v1/auth/csrf', {
       method: 'GET',
       credentials: 'include',
+      signal: controller.signal,
       headers: {
         Accept: 'application/json',
       },
@@ -59,11 +78,18 @@ export class CsrfManager {
       throw new Error('Anti-CSRF endpoint returned an empty token.');
     }
 
-    if (data.headerName) {
+    if (requestEpoch !== this.epoch) {
+      throw new Error('Anti-CSRF token fetch invalidated by context reset.');
+    }
+
+    if (typeof data.headerName === 'string' && CsrfManager.VALID_HEADER_NAME.test(data.headerName)) {
       this.headerName = data.headerName;
     }
 
     this.cachedToken = token;
+    if (this.abortController === controller) {
+      this.abortController = null;
+    }
     return token;
   }
 }

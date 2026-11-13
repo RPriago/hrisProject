@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Amazon;
 using Amazon.Runtime;
 using Amazon.S3;
@@ -12,6 +13,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -75,9 +77,15 @@ public partial class Program
         builder.Services.AddControllers()
             .AddApplicationPart(typeof(Program).Assembly);
         builder.Services.AddEndpointsApiExplorer();
-        builder.Services.AddDataProtection()
+        var dpBuilder = builder.Services.AddDataProtection()
             .SetApplicationName("PeopleFlow")
             .PersistKeysToPeopleFlowDbContext();
+
+        var dpCert = DataProtectionCertificateLoader.TryLoadFromConfiguration(builder.Configuration);
+        if (dpCert != null)
+        {
+            dpBuilder.ProtectKeysWithCertificate(dpCert);
+        }
 
         builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
             .AddCookie(cookieOptions =>
@@ -246,16 +254,57 @@ public partial class Program
 
         builder.Services.AddSingleton<IBackgroundJobClient>(_ =>
         {
-            try
+            if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing"))
             {
-                return new BackgroundJobClient(JobStorage.Current);
+                try
+                {
+                    return new BackgroundJobClient(JobStorage.Current);
+                }
+                catch
+                {
+                    return new DefaultFallbackBackgroundJobClient();
+                }
             }
-            catch
-            {
-                return new DefaultFallbackBackgroundJobClient();
-            }
+
+            return new BackgroundJobClient(JobStorage.Current);
         });
         builder.Services.AddScoped<IBackgroundJobService, HangfireBackgroundJobService>();
+        builder.Services.AddHsts(options =>
+        {
+            options.MaxAge = TimeSpan.FromDays(365);
+            options.IncludeSubDomains = true;
+        });
+
+        builder.Services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+            options.AddPolicy("auth-csrf", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 60,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        AutoReplenishment = true
+                    }));
+
+            options.AddPolicy("healthz", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 60,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        AutoReplenishment = true
+                    }));
+        });
+
+        builder.Services.AddRuntimeLogRedaction();
 
         return builder;
     }
@@ -264,11 +313,16 @@ public partial class Program
     {
         // Enforce pipeline order: ForwardedHeaders -> CorrelationId -> SecurityHeaders -> ProblemDetails -> Routing -> Csrf -> TenantResolution -> Controllers
         app.UseForwardedHeaders();
+        if (!app.Environment.IsDevelopment() && !app.Environment.IsEnvironment("Testing"))
+        {
+            app.UseHsts();
+        }
         app.UseMiddleware<CorrelationIdMiddleware>();
         app.UseMiddleware<SecurityHeadersMiddleware>();
         app.UseMiddleware<ProblemDetailsMiddleware>();
 
         app.UseRouting();
+        app.UseRateLimiter();
 
         app.UseAuthentication();
         app.UseAuthorization();

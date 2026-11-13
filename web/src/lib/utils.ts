@@ -91,3 +91,34 @@ export function formatWorkDate(dateString: string | null | undefined): string {
 
   return `${day} ${monthName} ${year}`;
 }
+
+/**
+ * Validates image/asset URLs against an allowlist of safe relative paths or HTTP(S) URLs.
+ * Rejects javascript:, vbscript:, data:, blob:, and protocol-relative (//) URLs.
+ */
+export function sanitizeSafeAssetUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (/[\u0000-\u001F\u007F]/.test(trimmed)) return null;
+  if (trimmed.startsWith('//')) return null;
+
+  if (trimmed.startsWith('/')) {
+    return trimmed;
+  }
+
+  const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed);
+  if (!hasScheme) {
+    return trimmed;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

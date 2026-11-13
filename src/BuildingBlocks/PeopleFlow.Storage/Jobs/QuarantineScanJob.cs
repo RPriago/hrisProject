@@ -54,30 +54,78 @@ public class QuarantineScanJob
 
         if (storedFile.ScanStatus != FileStatus.Quarantined)
         {
-            return; // Already processed
+            return; // Already processed or currently scanning
         }
 
-        var bucket = storedFile.BucketName ?? _options.QuarantineBucket;
-        await using var stream = await _blobStorage.GetObjectStreamAsync(bucket, storedFile.StorageKey, cancellationToken);
-        if (stream == null)
+        if (_dbContext.Database.IsRelational())
         {
-            throw new FileNotFoundException($"Quarantine file object not found for '{storedFile.Id}'.");
-        }
+            var claimedCount = await _dbContext.StoredFiles
+                .Where(f => f.Id == storedFile.Id &&
+                            f.TenantId == envelope.TenantId &&
+                            f.ScanStatus == FileStatus.Quarantined)
+                .ExecuteUpdateAsync(
+                    setters => setters.SetProperty(f => f.ScanStatus, FileStatus.Scanning),
+                    cancellationToken);
 
-        var scanResult = await _scanner.ScanAsync(stream, storedFile.OriginalFileName, cancellationToken);
-        if (scanResult.IsClean)
-        {
-            await _fileService.PromoteToAvailableAsync(storedFile.Id, cancellationToken);
-        }
-        else if (scanResult.ThreatName != null &&
-                 (scanResult.ThreatName.Contains("BlockedExtension", StringComparison.OrdinalIgnoreCase) ||
-                  scanResult.ThreatName.Contains("DisguisedExecutable", StringComparison.OrdinalIgnoreCase)))
-        {
-            await _fileService.RejectInvalidTypeAsync(storedFile.Id, scanResult.ThreatName, cancellationToken);
+            if (claimedCount == 0)
+            {
+                return; // Concurrent worker already claimed or processed this file
+            }
+
+            // Reload entity so provider concurrency tokens (e.g., PostgreSQL xmin) match the updated row
+            await _dbContext.Entry(storedFile).ReloadAsync(cancellationToken);
         }
         else
         {
-            await _fileService.RejectInfectedAsync(storedFile.Id, scanResult.ThreatName, cancellationToken);
+            storedFile.ScanStatus = FileStatus.Scanning;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        try
+        {
+            var bucket = storedFile.BucketName ?? _options.QuarantineBucket;
+            await using var stream = await _blobStorage.GetObjectStreamAsync(bucket, storedFile.StorageKey, cancellationToken);
+            if (stream == null)
+            {
+                throw new FileNotFoundException($"Quarantine file object not found for '{storedFile.Id}'.");
+            }
+
+            var scanResult = await _scanner.ScanAsync(stream, storedFile.OriginalFileName, cancellationToken);
+            if (scanResult.IsClean)
+            {
+                await _fileService.PromoteToAvailableAsync(storedFile.Id, cancellationToken);
+            }
+            else if (scanResult.ThreatName != null &&
+                     (scanResult.ThreatName.Contains("BlockedExtension", StringComparison.OrdinalIgnoreCase) ||
+                      scanResult.ThreatName.Contains("DisguisedExecutable", StringComparison.OrdinalIgnoreCase)))
+            {
+                await _fileService.RejectInvalidTypeAsync(storedFile.Id, scanResult.ThreatName, cancellationToken);
+            }
+            else
+            {
+                await _fileService.RejectInfectedAsync(storedFile.Id, scanResult.ThreatName, cancellationToken);
+            }
+        }
+        catch
+        {
+            // Revert Scanning -> Quarantined on transient scan/blob error so background retries can re-claim the file
+            if (_dbContext.Database.IsRelational())
+            {
+                await _dbContext.StoredFiles
+                    .Where(f => f.Id == storedFile.Id &&
+                                f.TenantId == envelope.TenantId &&
+                                f.ScanStatus == FileStatus.Scanning)
+                    .ExecuteUpdateAsync(
+                        setters => setters.SetProperty(f => f.ScanStatus, FileStatus.Quarantined),
+                        CancellationToken.None);
+            }
+            else
+            {
+                storedFile.ScanStatus = FileStatus.Quarantined;
+                await _dbContext.SaveChangesAsync(CancellationToken.None);
+            }
+
+            throw;
         }
     }
 }

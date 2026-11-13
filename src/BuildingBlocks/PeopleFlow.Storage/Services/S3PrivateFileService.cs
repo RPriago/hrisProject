@@ -92,7 +92,18 @@ public class S3PrivateFileService : IPrivateFileService
                 "Storage:MaxFileSizeBytes must be configured to a positive limit before accepting file uploads.");
         }
 
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentType);
         var sanitizedFileName = FileUploadIngressValidator.SanitizeFileName(fileName);
+
+        if (sanitizedFileName.Length > 255)
+        {
+            throw new ArgumentException("Sanitized file name exceeds maximum length of 255 characters.", nameof(fileName));
+        }
+
+        if (contentType.Length > 120)
+        {
+            throw new ArgumentException("Content-Type exceeds maximum length of 120 characters.", nameof(contentType));
+        }
 
         using var tenantScope = _dbContext.BeginOperationTenantScope(tenantId);
 
@@ -392,6 +403,15 @@ public class S3PrivateFileService : IPrivateFileService
         {
             throw new InvalidOperationException(
                 $"Cannot bind file '{storedFileId}' with status '{storedFile.ScanStatus}'. File must be '{FileStatus.Available}'.");
+        }
+
+        if (storedFile.OwnerEntityId.HasValue &&
+            (storedFile.OwnerEntityId.Value != ownerEntityId ||
+             !string.Equals(storedFile.OwnerEntityType, ownerEntityType, StringComparison.Ordinal) ||
+             !string.Equals(storedFile.OwnerModule, ownerModule, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                $"StoredFile '{storedFileId}' is already bound to '{storedFile.OwnerModule}/{storedFile.OwnerEntityType}/{storedFile.OwnerEntityId.Value}'.");
         }
 
         storedFile.OwnerModule = ownerModule;

@@ -18,7 +18,8 @@ import {
   DropdownMenuItem,
   useDropdownDismiss,
 } from '@/components/ui/DropdownMenu';
-import { cn } from '@/lib/utils';
+import { cn, sanitizeSafeAssetUrl } from '@/lib/utils';
+import { registerMemoryWipeListener } from '@/lib/queryClient';
 
 export interface TopbarProps {
   onOpenMobileMenu?: () => void;
@@ -37,11 +38,19 @@ export function Topbar({ onOpenMobileMenu, className }: TopbarProps) {
   useDropdownDismiss(profileRef, isProfileOpen, closeProfile);
 
   useEffect(() => {
+    return registerMemoryWipeListener(() => {
+      setActiveNotification(null);
+      setIsProfileOpen(false);
+    });
+  }, []);
+
+  useEffect(() => {
     setAvatarLoadError(false);
   }, [user?.avatarUrl]);
 
-  const firstName = user?.name ? user.name.split(' ')[0] : 'Sari';
-  const showPhotoAvatar = Boolean(user?.avatarUrl) && !avatarLoadError;
+  const firstName = user?.name ? user.name.split(' ')[0] : 'Pengguna';
+  const safeAvatarUrl = sanitizeSafeAssetUrl(user?.avatarUrl);
+  const showPhotoAvatar = Boolean(safeAvatarUrl) && !avatarLoadError;
 
   return (
     <header
@@ -132,7 +141,7 @@ export function Topbar({ onOpenMobileMenu, className }: TopbarProps) {
             <div className="h-10 w-10 rounded-full overflow-hidden ring-1 ring-slate-200/90 bg-[#1E232D] text-white font-semibold text-sm flex items-center justify-center shrink-0">
               {showPhotoAvatar ? (
                 <img
-                  src={user?.avatarUrl}
+                  src={safeAvatarUrl!}
                   alt={user?.name || 'User profile'}
                   width={40}
                   height={40}
@@ -140,16 +149,16 @@ export function Topbar({ onOpenMobileMenu, className }: TopbarProps) {
                   className="h-full w-full object-cover object-center"
                 />
               ) : (
-                <span>{user?.avatarInitial || 'SW'}</span>
+                <span>{user?.avatarInitial || 'US'}</span>
               )}
             </div>
 
             <div className="hidden sm:flex flex-col min-w-0">
               <span className="text-sm font-semibold text-slate-900 truncate">
-                {user?.name || 'Sari Wijaya'}
+                {user?.name || 'Pengguna Terautentikasi'}
               </span>
               <span className="text-xs text-slate-500 truncate">
-                {user?.email || 'sari.wijaya@nusantara.id'}
+                {user?.email || '-'}
               </span>
             </div>
 

@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
+import { registerMemoryWipeListener } from '@/lib/queryClient';
 import {
   LayoutDashboard,
   Users,
@@ -45,6 +46,12 @@ export function Sidebar({ activePath = '/dashboard', onNavigate, className }: Si
   const { logout } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    return registerMemoryWipeListener(() => {
+      setSearchQuery('');
+    });
+  }, []);
 
   const menuGroups: SidebarGroup[] = [
     {
@@ -115,6 +122,7 @@ export function Sidebar({ activePath = '/dashboard', onNavigate, className }: Si
             <Search className="absolute left-3.5 h-4 w-4 text-slate-400" />
             <input
               type="text"
+              autoComplete="off"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search"

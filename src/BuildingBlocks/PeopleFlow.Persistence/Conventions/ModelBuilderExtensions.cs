@@ -52,10 +52,13 @@ public static class ModelBuilderExtensions
                 ? Expression.Convert(entityTenantProp, typeof(Guid?))
                 : entityTenantProp;
 
-            // Direct comparison between Guid? and Guid?
-            // When CurrentTenantId is null: (Guid?)e.TenantId == null evaluates to false (fail-closed, 0 rows)
-            // When CurrentTenantId has tenant: (Guid?)e.TenantId == CurrentTenantId matches tenant rows
-            var filterExpression = Expression.Equal(convertedTenantProp, currentTenantIdAccess);
+            // Fail-closed comparison: requires CurrentTenantId != null AND matching TenantId.
+            // Prevents (Guid?)e.TenantId == null matching platform rows when CurrentTenantId is null.
+            var hasActiveTenant = Expression.NotEqual(
+                currentTenantIdAccess,
+                Expression.Constant(null, typeof(Guid?)));
+            var tenantMatches = Expression.Equal(convertedTenantProp, currentTenantIdAccess);
+            var filterExpression = Expression.AndAlso(hasActiveTenant, tenantMatches);
 
             var lambda = Expression.Lambda(filterExpression, parameter);
             modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);

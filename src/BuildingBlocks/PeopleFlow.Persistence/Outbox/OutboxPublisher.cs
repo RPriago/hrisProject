@@ -32,7 +32,8 @@ public class OutboxPublisher : IOutboxPublisher
         ArgumentNullException.ThrowIfNull(message);
 
         var messageType = typeof(T).FullName ?? typeof(T).Name;
-        var payloadJson = JsonSerializer.Serialize(message);
+        var sanitizedPayload = PeopleFlow.Security.Redaction.SensitiveDataRedactor.SanitizeObjectGraph(message);
+        var payloadJson = JsonSerializer.Serialize(sanitizedPayload);
 
         return PublishRawAsync(messageType, payloadJson, correlationId, tenantId, autoSave, cancellationToken);
     }
@@ -50,7 +51,15 @@ public class OutboxPublisher : IOutboxPublisher
             throw new ArgumentException("Message type cannot be empty.", nameof(messageType));
         }
 
-        var effectiveTenantId = tenantId ?? _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
+        var ambientTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
+        var effectiveTenantId = tenantId ?? ambientTenantId;
+
+        if (ambientTenantId.HasValue && effectiveTenantId != ambientTenantId.Value)
+        {
+            throw new UnauthorizedAccessException(
+                $"Cannot publish outbox message for tenant '{effectiveTenantId}' while ambient tenant context is '{ambientTenantId.Value}'.");
+        }
+
         var now = _clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
         var outboxMessage = new OutboxMessage

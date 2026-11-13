@@ -5,6 +5,7 @@ using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Entities;
+using PeopleFlow.Security.Redaction;
 
 namespace PeopleFlow.Jobs.Tracker;
 
@@ -226,7 +227,7 @@ public sealed class JobProgressTracker : IJobProgressTracker
         run.Status = JobRunStatus.Failed;
         run.StartedAtUtc ??= now;
         run.CompletedAtUtc = now;
-        run.ErrorDetails = errorDetails;
+        run.ErrorDetails = SanitizeErrorDetails(errorDetails) ?? string.Empty;
         if (errorReportFileId.HasValue)
         {
             run.ErrorReportFileId = errorReportFileId;
@@ -243,7 +244,7 @@ public sealed class JobProgressTracker : IJobProgressTracker
         CancellationToken cancellationToken = default)
     {
         var run = await GetRequiredRunAsync(jobRunId, cancellationToken);
-        run.MarkCompletedWithErrors(errorDetails, errorReportFileId, _clock?.UtcNow);
+        run.MarkCompletedWithErrors(SanitizeErrorDetails(errorDetails), errorReportFileId, _clock?.UtcNow);
 
         await SaveChangesInTenantScopeAsync(run.TenantId, cancellationToken);
         return run;
@@ -255,7 +256,7 @@ public sealed class JobProgressTracker : IJobProgressTracker
         CancellationToken cancellationToken = default)
     {
         var run = await GetRequiredRunAsync(jobRunId, cancellationToken);
-        run.MarkCancelled(reason, _clock?.UtcNow);
+        run.MarkCancelled(SanitizeErrorDetails(reason), _clock?.UtcNow);
 
         await SaveChangesInTenantScopeAsync(run.TenantId, cancellationToken);
         return run;
@@ -300,5 +301,10 @@ public sealed class JobProgressTracker : IJobProgressTracker
     {
         using var tenantScope = _dbContext.BeginOperationTenantScope(tenantId);
         await _dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private static string? SanitizeErrorDetails(string? details)
+    {
+        return details is null ? null : SensitiveDataRedactor.RedactSecretsFromText(details);
     }
 }

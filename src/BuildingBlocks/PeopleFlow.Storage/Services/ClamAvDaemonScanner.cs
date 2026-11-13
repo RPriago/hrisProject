@@ -22,30 +22,63 @@ public sealed class ClamAvDaemonScanner : IFileQuarantineScanner
         _options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
-    public Task<FileScanResult> ScanAsync(byte[] fileBytes, string fileName, CancellationToken cancellationToken = default)
+    public async Task<FileScanResult> ScanAsync(byte[] fileBytes, string fileName, CancellationToken cancellationToken = default)
     {
         using var ms = new MemoryStream(fileBytes, writable: false);
-        return ScanAsync(ms, fileName, cancellationToken);
+        return await ScanAsync(ms, fileName, cancellationToken);
     }
 
     public async Task<FileScanResult> ScanAsync(Stream fileStream, string fileName, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(fileStream);
 
+        if (!string.IsNullOrWhiteSpace(fileName) &&
+            FileUploadIngressValidator.FindDangerousExtension(fileName) is { } blockedExtension)
+        {
+            return new FileScanResult(false, $"Heuristic.BlockedExtension:{blockedExtension}");
+        }
+
+        if (_options.MaxFileSizeBytes <= 0)
+        {
+            throw new InvalidOperationException(
+                "Storage:MaxFileSizeBytes must be configured to a positive limit before scanning files.");
+        }
+
         long originalPosition = 0;
         if (fileStream.CanSeek)
         {
             originalPosition = fileStream.Position;
             fileStream.Position = 0;
+
+            if (fileStream.Length > _options.MaxFileSizeBytes)
+            {
+                throw new InvalidOperationException(
+                    $"File size exceeds maximum allowed scan limit of {_options.MaxFileSizeBytes} bytes.");
+            }
         }
 
         try
         {
-            using var headBuffer = new MemoryStream();
-            await fileStream.CopyToAsync(headBuffer, cancellationToken);
-            var payload = headBuffer.ToArray();
+            // Read only a small fixed header window to detect disguised executables before opening a network stream
+            const int headerInspectSize = 64;
+            var headerLimit = (int)Math.Min(headerInspectSize, _options.MaxFileSizeBytes);
+            var headerBuffer = new byte[headerLimit];
+            var headerLength = 0;
 
-            if (FileUploadIngressValidator.HasExecutableMagicHeader(payload))
+            while (headerLength < headerBuffer.Length)
+            {
+                var read = await fileStream.ReadAsync(
+                    headerBuffer.AsMemory(headerLength, headerBuffer.Length - headerLength),
+                    cancellationToken);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                headerLength += read;
+            }
+
+            if (FileUploadIngressValidator.HasExecutableMagicHeader(headerBuffer.AsSpan(0, headerLength)))
             {
                 return new FileScanResult(false, "Heuristic.DisguisedExecutable");
             }
@@ -75,14 +108,29 @@ public sealed class ClamAvDaemonScanner : IFileQuarantineScanner
 
             const int chunkSize = 8192;
             var lenPrefix = new byte[4];
-            var offset = 0;
-            while (offset < payload.Length)
+            long totalStreamed = headerLength;
+
+            if (headerLength > 0)
             {
-                var count = Math.Min(chunkSize, payload.Length - offset);
-                BinaryPrimitives.WriteUInt32BigEndian(lenPrefix, (uint)count);
+                BinaryPrimitives.WriteUInt32BigEndian(lenPrefix, (uint)headerLength);
                 await networkStream.WriteAsync(lenPrefix, timeoutCts.Token);
-                await networkStream.WriteAsync(payload.AsMemory(offset, count), timeoutCts.Token);
-                offset += count;
+                await networkStream.WriteAsync(headerBuffer.AsMemory(0, headerLength), timeoutCts.Token);
+            }
+
+            var chunkBuffer = new byte[chunkSize];
+            int bytesRead;
+            while ((bytesRead = await fileStream.ReadAsync(chunkBuffer, timeoutCts.Token)) > 0)
+            {
+                totalStreamed += bytesRead;
+                if (totalStreamed > _options.MaxFileSizeBytes)
+                {
+                    throw new InvalidOperationException(
+                        $"File size exceeds maximum allowed scan limit of {_options.MaxFileSizeBytes} bytes.");
+                }
+
+                BinaryPrimitives.WriteUInt32BigEndian(lenPrefix, (uint)bytesRead);
+                await networkStream.WriteAsync(lenPrefix, timeoutCts.Token);
+                await networkStream.WriteAsync(chunkBuffer.AsMemory(0, bytesRead), timeoutCts.Token);
             }
 
             await networkStream.WriteAsync(EndOfStreamTerminator, timeoutCts.Token);

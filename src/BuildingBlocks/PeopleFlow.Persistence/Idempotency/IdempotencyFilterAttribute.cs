@@ -46,7 +46,7 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
             return;
         }
 
-        var endpointKey = $"{context.HttpContext.Request.Method}:{context.HttpContext.Request.Path}";
+        var endpointKey = ComputeEndpointKey(context.HttpContext.Request);
         var idempotencyService = context.HttpContext.RequestServices.GetService<IIdempotencyService>()
             ?? throw new InvalidOperationException(
                 "IIdempotencyService is not registered in the request service provider. Fail-closed idempotency enforcement cannot proceed.");
@@ -80,6 +80,35 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
 
         var actorContext = context.HttpContext.RequestServices.GetService<PeopleFlow.Security.Context.ICurrentActorContext>();
         var actorUserId = ExtractActorUserId(context.HttpContext.User) ?? actorContext?.UserId;
+        var allowAnonymous = context.ActionDescriptor.EndpointMetadata
+            .OfType<Microsoft.AspNetCore.Authorization.IAllowAnonymous>()
+            .Any();
+
+        if (!allowAnonymous && (!actorUserId.HasValue || actorUserId.Value == Guid.Empty))
+        {
+            context.Result = CreateProblemResult(
+                StatusCodes.Status401Unauthorized,
+                "Authentication Required",
+                "An authenticated actor identity is required for idempotent requests.",
+                "AUTH_REQUIRED",
+                context.HttpContext);
+            return;
+        }
+
+        var subStatus = tenantAccessor?.CurrentTenant.SubscriptionStatus;
+        if (string.Equals(subStatus, "Suspended", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(subStatus, "Terminated", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(subStatus, "Cancelled", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(subStatus, "Expired", StringComparison.OrdinalIgnoreCase))
+        {
+            context.Result = CreateProblemResult(
+                StatusCodes.Status403Forbidden,
+                "Tenant Suspended",
+                "Tenant subscription is not active.",
+                "TENANT_SUSPENDED",
+                context.HttpContext);
+            return;
+        }
 
         var resolution = await idempotencyService.CheckOrAcquireLockAsync(
             idempotencyKey,
@@ -112,21 +141,27 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
 
             case IdempotencyExecutionStatus.CachedResponse:
                 context.HttpContext.Response.Headers["X-Cache-Lookup"] = "HIT";
-                context.Result = new ContentResult
-                {
-                    StatusCode = resolution.CachedStatusCode ?? StatusCodes.Status200OK,
-                    Content = resolution.CachedResponseBody,
-                    ContentType = "application/json"
-                };
+                context.Result = CreateReplayResult(resolution, context.HttpContext);
                 return;
 
             case IdempotencyExecutionStatus.Execute:
             default:
+            {
                 var executedContext = await next();
+
+                // Persist idempotency completion with a bounded timeout token detached from client disconnects
+                using var completionCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
                 if (executedContext.Exception == null || executedContext.ExceptionHandled)
                 {
-                    var (statusCode, responseBody) = ExtractResponse(executedContext.Result, context.HttpContext.Response.StatusCode);
+                    var mvcJsonOptions = context.HttpContext.RequestServices
+                        .GetService<Microsoft.Extensions.Options.IOptions<Microsoft.AspNetCore.Mvc.JsonOptions>>()
+                        ?.Value.JsonSerializerOptions;
+
+                    var (statusCode, responseEnvelopeJson) = ExtractResponse(
+                        executedContext.Result,
+                        context.HttpContext.Response,
+                        mvcJsonOptions);
 
                     if (statusCode < StatusCodes.Status500InternalServerError)
                     {
@@ -134,10 +169,10 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
                             idempotencyKey,
                             endpointKey,
                             statusCode,
-                            responseBody,
+                            responseEnvelopeJson,
                             tenantId: tenantId,
                             actorUserId: actorUserId,
-                            cancellationToken: context.HttpContext.RequestAborted);
+                            cancellationToken: completionCts.Token);
                     }
                     else
                     {
@@ -146,7 +181,7 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
                             endpointKey,
                             tenantId: tenantId,
                             actorUserId: actorUserId,
-                            cancellationToken: context.HttpContext.RequestAborted);
+                            cancellationToken: completionCts.Token);
                     }
                 }
                 else
@@ -156,9 +191,10 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
                         endpointKey,
                         tenantId: tenantId,
                         actorUserId: actorUserId,
-                        cancellationToken: context.HttpContext.RequestAborted);
+                        cancellationToken: completionCts.Token);
                 }
                 break;
+            }
         }
     }
 
@@ -223,26 +259,168 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
         return null;
     }
 
-    private static (int StatusCode, string? Body) ExtractResponse(IActionResult? result, int responseStatusCode)
+    private sealed record IdempotencyResponseEnvelope(
+        bool EnvelopeMarker,
+        int StatusCode,
+        string? ContentType,
+        string? Body,
+        string? Location);
+
+    private static string ComputeEndpointKey(HttpRequest request)
     {
-        return result switch
+        var method = request.Method.ToUpperInvariant();
+        var path = request.Path.Value ?? "/";
+
+        string canonical;
+        if (!request.QueryString.HasValue)
         {
-            ObjectResult obj => (
-                obj.StatusCode ?? responseStatusCode,
-                obj.Value is string str ? str : JsonSerializer.Serialize(obj.Value)
-            ),
-            ContentResult content => (
-                content.StatusCode ?? responseStatusCode,
-                content.Content
-            ),
-            StatusCodeResult status => (
-                status.StatusCode,
-                null
-            ),
-            _ => (
-                responseStatusCode,
-                null
-            )
+            canonical = $"{method}:{path}";
+        }
+        else
+        {
+            var parsed = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(request.QueryString.Value);
+            var queryParts = parsed
+                .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .SelectMany(kv => kv.Value
+                    .Where(v => v != null)
+                    .OrderBy(v => v, StringComparer.Ordinal)
+                    .Select(v => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(v!)}"));
+            canonical = $"{method}:{path}?{string.Join('&', queryParts)}";
+        }
+
+        if (canonical.Length <= 160)
+        {
+            return canonical;
+        }
+
+        var hashBytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        var hashHex = Convert.ToHexString(hashBytes).ToLowerInvariant();
+        return $"{canonical[..95]}#{hashHex}";
+    }
+
+    private static (int StatusCode, string BodyEnvelopeJson) ExtractResponse(
+        IActionResult? result,
+        HttpResponse response,
+        JsonSerializerOptions? jsonOptions)
+    {
+        var serializerOptions = jsonOptions ?? new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var location = response.Headers.Location.ToString();
+        if (string.IsNullOrWhiteSpace(location))
+        {
+            location = null;
+        }
+
+        int statusCode;
+        string? contentType;
+        string? body;
+
+        switch (result)
+        {
+            case JsonResult jsonRes:
+                statusCode = jsonRes.StatusCode ?? response.StatusCode;
+                contentType = string.IsNullOrWhiteSpace(jsonRes.ContentType) ? "application/json" : jsonRes.ContentType;
+                body = jsonRes.Value is null
+                    ? null
+                    : JsonSerializer.Serialize(jsonRes.Value, jsonRes.SerializerSettings as JsonSerializerOptions ?? serializerOptions);
+                break;
+
+            case ObjectResult obj:
+                statusCode = obj.StatusCode ?? response.StatusCode;
+                if (obj.Value is string strVal)
+                {
+                    contentType = obj.ContentTypes.FirstOrDefault() ?? "text/plain";
+                    body = strVal;
+                }
+                else
+                {
+                    contentType = obj.ContentTypes.FirstOrDefault() ?? "application/json";
+                    body = obj.Value is null ? null : JsonSerializer.Serialize(obj.Value, serializerOptions);
+                }
+                break;
+
+            case ContentResult content:
+                statusCode = content.StatusCode ?? response.StatusCode;
+                contentType = string.IsNullOrWhiteSpace(content.ContentType) ? "text/plain" : content.ContentType;
+                body = content.Content;
+                break;
+
+            case StatusCodeResult status:
+                statusCode = status.StatusCode;
+                contentType = null;
+                body = null;
+                break;
+
+            default:
+                statusCode = response.StatusCode;
+                contentType = null;
+                body = null;
+                break;
+        }
+
+        var envelope = new IdempotencyResponseEnvelope(
+            EnvelopeMarker: true,
+            StatusCode: statusCode,
+            ContentType: contentType,
+            Body: body,
+            Location: location);
+
+        return (statusCode, JsonSerializer.Serialize(envelope));
+    }
+
+    private static IActionResult CreateReplayResult(IdempotencyResolution resolution, HttpContext httpContext)
+    {
+        var fallbackStatus = resolution.CachedStatusCode ?? StatusCodes.Status200OK;
+        var raw = resolution.CachedResponseBody;
+
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(raw);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                    doc.RootElement.TryGetProperty("EnvelopeMarker", out var marker) &&
+                    marker.ValueKind == JsonValueKind.True)
+                {
+                    var envelope = doc.RootElement.Deserialize<IdempotencyResponseEnvelope>();
+                    if (envelope != null)
+                    {
+                        if (!string.IsNullOrWhiteSpace(envelope.Location))
+                        {
+                            httpContext.Response.Headers["Location"] = envelope.Location;
+                        }
+
+                        var status = envelope.StatusCode > 0 ? envelope.StatusCode : fallbackStatus;
+                        if (status == StatusCodes.Status204NoContent ||
+                            (envelope.Body == null && envelope.ContentType == null))
+                        {
+                            return new StatusCodeResult(status);
+                        }
+
+                        return new ContentResult
+                        {
+                            StatusCode = status,
+                            Content = envelope.Body,
+                            ContentType = envelope.ContentType ?? "application/json"
+                        };
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // Fall back to direct payload replay below
+            }
+        }
+
+        if (fallbackStatus == StatusCodes.Status204NoContent)
+        {
+            return new StatusCodeResult(StatusCodes.Status204NoContent);
+        }
+
+        return new ContentResult
+        {
+            StatusCode = fallbackStatus,
+            Content = raw,
+            ContentType = "application/json"
         };
     }
 

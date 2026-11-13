@@ -46,6 +46,24 @@ export class ApiClientError extends Error {
   }
 }
 
+function sanitizeRawDetail(raw: string, status: number): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+
+  const looksLikeHtml =
+    trimmed.startsWith('<') ||
+    trimmed.toLowerCase().includes('<!doctype') ||
+    /<\/?[a-z][\s\S]*>/i.test(trimmed);
+
+  if (looksLikeHtml || trimmed.length > 300) {
+    return status >= 500
+      ? 'Terjadi kesalahan pada server. Silakan coba lagi atau hubungi administrator.'
+      : getDefaultTitleForStatus(status);
+  }
+
+  return trimmed;
+}
+
 export function parseProblemDetails(
   status: number,
   body: unknown,
@@ -55,22 +73,33 @@ export function parseProblemDetails(
 
   if (body && typeof body === 'object') {
     const b = body as Record<string, unknown>;
-    const correlationId = (b.correlationId as string) || correlationIdFromHeader;
+    const correlationId = (typeof b.correlationId === 'string' && b.correlationId) || correlationIdFromHeader;
+    const rawDetail =
+      typeof b.detail === 'string'
+        ? b.detail
+        : typeof b.message === 'string'
+          ? b.message
+          : undefined;
 
     return {
-      type: (b.type as string) || `https://httpstatuses.com/${status}`,
-      title: (b.title as string) || getDefaultTitleForStatus(status),
+      type: (typeof b.type === 'string' && b.type) || `https://httpstatuses.com/${status}`,
+      title: (typeof b.title === 'string' && b.title) || getDefaultTitleForStatus(status),
       status: typeof b.status === 'number' ? b.status : status,
-      code: (b.code as string) || (b.errorCode as string) || getDefaultCodeForStatus(status),
-      detail: (b.detail as string) || (b.message as string) || undefined,
-      instance: (b.instance as string) || undefined,
-      correlationId: correlationId,
-      errors: (b.errors as Record<string, string[]>) || undefined,
-      ...b,
+      code:
+        (typeof b.code === 'string' && b.code) ||
+        (typeof b.errorCode === 'string' && b.errorCode) ||
+        getDefaultCodeForStatus(status),
+      detail: rawDetail ? sanitizeRawDetail(rawDetail, status) : undefined,
+      instance: typeof b.instance === 'string' ? b.instance : undefined,
+      correlationId,
+      errors:
+        b.errors && typeof b.errors === 'object' && !Array.isArray(b.errors)
+          ? (b.errors as Record<string, string[]>)
+          : undefined,
     };
   }
 
-  const detailText = typeof body === 'string' && body.trim().length > 0 ? body.trim() : undefined;
+  const detailText = typeof body === 'string' ? sanitizeRawDetail(body, status) : undefined;
 
   return {
     type: `https://httpstatuses.com/${status}`,

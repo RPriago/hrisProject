@@ -96,6 +96,7 @@ public class PythonCsvValidationRunner : IPythonCsvValidationRunner
 
             ConfigureSanitizedEnvironment(startInfo, tempDir);
 
+            startInfo.ArgumentList.Add("-I");
             startInfo.ArgumentList.Add(scriptPath);
             startInfo.ArgumentList.Add("--manifest");
             startInfo.ArgumentList.Add(manifestPath);
@@ -148,7 +149,7 @@ public class PythonCsvValidationRunner : IPythonCsvValidationRunner
                          ?? throw new InvalidOperationException("Failed to deserialize CSV validation report.");
 
             var normalizedRows = new List<string>();
-            if (File.Exists(ndjsonPath))
+            if (report.IsValid && File.Exists(ndjsonPath))
             {
                 using var reader = new StreamReader(ndjsonPath, Encoding.UTF8);
                 string? line;

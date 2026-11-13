@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PeopleFlow.Persistence.Context;
@@ -37,6 +38,7 @@ public class HealthController : ControllerBase
     }
 
     [HttpGet]
+    [EnableRateLimiting("healthz")]
     public async Task<IActionResult> CheckHealth(CancellationToken cancellationToken)
     {
         var dbHealthy = false;
@@ -56,8 +58,9 @@ public class HealthController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Health check database probe failed.");
-            dbError = isDevOrTest ? ex.Message : "Database connectivity check failed.";
+            var summary = PeopleFlow.Security.Redaction.SensitiveDataRedactor.SanitizeExceptionSummary(ex);
+            _logger?.LogError("Health check database probe failed: {ExceptionSummary}", summary);
+            dbError = isDevOrTest ? summary : "Database connectivity check failed.";
         }
 
         try
@@ -77,8 +80,9 @@ public class HealthController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Health check storage probe failed.");
-            storageError = isDevOrTest ? ex.Message : "Storage connectivity check failed.";
+            var summary = PeopleFlow.Security.Redaction.SensitiveDataRedactor.SanitizeExceptionSummary(ex);
+            _logger?.LogError("Health check storage probe failed: {ExceptionSummary}", summary);
+            storageError = isDevOrTest ? summary : "Storage connectivity check failed.";
             storageHealthy = false;
         }
 

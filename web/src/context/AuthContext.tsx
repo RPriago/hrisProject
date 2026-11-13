@@ -1,5 +1,7 @@
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useState, useEffect } from 'react';
 import { wipeTenantCache } from '@/lib/queryClient';
+import { IS_DEMO_MODE } from '@/lib/env';
+import { apiClient } from '@/lib/api/apiClient';
 
 export type DemoRole =
   | 'PlatformAdmin'
@@ -22,8 +24,14 @@ export interface UserProfile {
   requireMfa?: boolean;
 }
 
-export const DEMO_USERS: Record<DemoRole, UserProfile> = {
-  PlatformAdmin: {
+const STATIC_DEMO_ENABLED =
+  import.meta.env.DEV ||
+  import.meta.env.MODE === 'test' ||
+  import.meta.env.VITE_ENABLE_DEMO_MODE === 'true';
+
+export const DEMO_USERS: Partial<Record<DemoRole, UserProfile>> = STATIC_DEMO_ENABLED
+  ? {
+      PlatformAdmin: {
     id: 'usr-plat-01',
     name: 'Platform Operator',
     email: 'ops@quorum.internal',
@@ -94,14 +102,14 @@ export const DEMO_USERS: Record<DemoRole, UserProfile> = {
     badgeColor: '#374151',
     requireMfa: true,
   },
-};
+} : {};
 
 interface AuthContextValue {
   user: UserProfile | null;
   isAuthenticated: boolean;
   login: (role: DemoRole) => void;
   logout: () => void;
-  availableDemoRoles: typeof DEMO_USERS;
+  availableDemoRoles: Partial<Record<DemoRole, UserProfile>>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -109,13 +117,31 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 export function AuthProvider({
   children,
   defaultRole = 'HrAdmin',
+  demoMode = IS_DEMO_MODE,
+  initialUser = null,
 }: {
   children: React.ReactNode;
   defaultRole?: DemoRole;
+  demoMode?: boolean;
+  initialUser?: UserProfile | null;
 }) {
-  const [user, setUser] = useState<UserProfile | null>(() => DEMO_USERS[defaultRole] || null);
+  const [user, setUser] = useState<UserProfile | null>(() => {
+    if (initialUser) return initialUser;
+    return demoMode ? DEMO_USERS[defaultRole] || null : null;
+  });
+
+  useEffect(() => {
+    if (demoMode && !initialUser) {
+      setUser(DEMO_USERS[defaultRole] || null);
+    } else if (!demoMode && !initialUser) {
+      setUser(null);
+    }
+  }, [demoMode, defaultRole, initialUser]);
 
   const login = (role: DemoRole) => {
+    if (!demoMode) {
+      throw new Error('Demo login is disabled when demo mode is off.');
+    }
     wipeTenantCache();
     const targetUser = DEMO_USERS[role];
     if (targetUser) {
@@ -126,6 +152,9 @@ export function AuthProvider({
   const logout = () => {
     wipeTenantCache();
     setUser(null);
+    if (!demoMode) {
+      void apiClient.post('/api/v1/auth/logout', {}).catch(() => {});
+    }
   };
 
   const isAuthenticated = user !== null;
@@ -137,7 +166,7 @@ export function AuthProvider({
         isAuthenticated,
         login,
         logout,
-        availableDemoRoles: DEMO_USERS,
+        availableDemoRoles: demoMode ? DEMO_USERS : {},
       }}
     >
       {children}

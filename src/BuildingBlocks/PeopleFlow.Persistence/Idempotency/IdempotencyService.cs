@@ -59,12 +59,12 @@ public class IdempotencyService : IIdempotencyService
         {
             if (existing.ExpiresAtUtc <= now)
             {
-                // Expired: reset and re-execute (optimistic concurrency guards racing workers)
+                // Expired: reset with short InProgress lease and re-execute (optimistic concurrency guards racing workers)
                 existing.Status = IdempotencyStatus.InProgress;
                 existing.RequestHash = requestHash;
                 existing.ResponseStatusCode = null;
                 existing.ResponseBodyJson = null;
-                existing.ExpiresAtUtc = now.AddHours(24);
+                existing.ExpiresAtUtc = now.AddSeconds(90);
                 try
                 {
                     await _dbContext.SaveChangesAsync(cancellationToken);
@@ -97,6 +97,7 @@ public class IdempotencyService : IIdempotencyService
                 }
 
                 existing.Status = IdempotencyStatus.InProgress;
+                existing.ExpiresAtUtc = now.AddSeconds(90);
                 try
                 {
                     await _dbContext.SaveChangesAsync(cancellationToken);
@@ -113,7 +114,7 @@ public class IdempotencyService : IIdempotencyService
             return IdempotencyResolution.Conflict();
         }
 
-        // Record does not exist: attempt to create InProgress lock
+        // Record does not exist: attempt to create short-lease InProgress lock
         var newRecord = new IdempotencyRecord
         {
             TenantId = effectiveTenantId,
@@ -122,7 +123,7 @@ public class IdempotencyService : IIdempotencyService
             IdempotencyKey = idempotencyKey,
             RequestHash = requestHash,
             Status = IdempotencyStatus.InProgress,
-            ExpiresAtUtc = now.AddHours(24)
+            ExpiresAtUtc = now.AddSeconds(90)
         };
 
         _dbContext.IdempotencyRecords.Add(newRecord);
@@ -132,13 +133,12 @@ public class IdempotencyService : IIdempotencyService
             await _dbContext.SaveChangesAsync(cancellationToken);
             return IdempotencyResolution.CanExecute();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
         {
             // Simultaneous concurrency conflict: another request inserted the same key
             _dbContext.Entry(newRecord).State = EntityState.Detached;
 
             var collision = await _dbContext.IdempotencyRecords
-                .AsNoTracking()
                 .FirstOrDefaultAsync(r =>
                     r.TenantId == effectiveTenantId &&
                     r.ActorUserId == effectiveActorUserId &&
@@ -147,6 +147,25 @@ public class IdempotencyService : IIdempotencyService
 
             if (collision != null)
             {
+                if (collision.ExpiresAtUtc <= now)
+                {
+                    collision.Status = IdempotencyStatus.InProgress;
+                    collision.RequestHash = requestHash;
+                    collision.ResponseStatusCode = null;
+                    collision.ResponseBodyJson = null;
+                    collision.ExpiresAtUtc = now.AddSeconds(90);
+                    try
+                    {
+                        await _dbContext.SaveChangesAsync(cancellationToken);
+                        return IdempotencyResolution.CanExecute();
+                    }
+                    catch (DbUpdateConcurrencyException)
+                    {
+                        _dbContext.Entry(collision).State = EntityState.Detached;
+                        return IdempotencyResolution.Conflict();
+                    }
+                }
+
                 if (string.Equals(collision.Status, IdempotencyStatus.Completed, StringComparison.OrdinalIgnoreCase))
                 {
                     if (!string.Equals(collision.RequestHash, requestHash, StringComparison.OrdinalIgnoreCase))
@@ -158,10 +177,39 @@ public class IdempotencyService : IIdempotencyService
                         collision.ResponseStatusCode ?? 200,
                         collision.ResponseBodyJson);
                 }
+
+                if (string.Equals(collision.Status, IdempotencyStatus.FailedRetriable, StringComparison.OrdinalIgnoreCase))
+                {
+                    collision.Status = IdempotencyStatus.InProgress;
+                    collision.RequestHash = requestHash;
+                    collision.ExpiresAtUtc = now.AddSeconds(90);
+                    try
+                    {
+                        await _dbContext.SaveChangesAsync(cancellationToken);
+                        return IdempotencyResolution.CanExecute();
+                    }
+                    catch (DbUpdateConcurrencyException)
+                    {
+                        _dbContext.Entry(collision).State = EntityState.Detached;
+                        return IdempotencyResolution.Conflict();
+                    }
+                }
             }
 
             return IdempotencyResolution.Conflict();
         }
+    }
+
+    private static bool IsUniqueConstraintViolation(DbUpdateException ex)
+    {
+        if (ex.InnerException is Npgsql.PostgresException pgEx)
+        {
+            return string.Equals(pgEx.SqlState, "23505", StringComparison.Ordinal);
+        }
+
+        var message = ex.InnerException?.Message ?? ex.Message;
+        return message.Contains("UNIQUE", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task CompleteAsync(
@@ -182,6 +230,7 @@ public class IdempotencyService : IIdempotencyService
 
         var effectiveTenantId = ResolveEffectiveTenantId(tenantId);
         var effectiveActorUserId = actorUserId ?? Guid.Empty;
+        var now = _clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
         using var tenantScope = _dbContext.BeginOperationTenantScope(effectiveTenantId);
 
@@ -196,7 +245,8 @@ public class IdempotencyService : IIdempotencyService
         {
             record.Status = IdempotencyStatus.Completed;
             record.ResponseStatusCode = statusCode;
-            record.ResponseBodyJson = responseBody;
+            record.ResponseBodyJson = string.IsNullOrWhiteSpace(responseBody) ? "null" : responseBody;
+            record.ExpiresAtUtc = now.AddHours(24);
             await _dbContext.SaveChangesAsync(cancellationToken);
         }
     }

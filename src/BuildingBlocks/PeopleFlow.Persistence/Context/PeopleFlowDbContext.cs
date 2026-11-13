@@ -172,6 +172,9 @@ public class PeopleFlowDbContext : DbContext
                 continue;
             }
 
+            var activeTenantId = CurrentTenantId;
+            var hasActiveTenant = activeTenantId.HasValue;
+
             if (entry.Entity is OutboxMessage)
             {
                 if (tenantProp.CurrentValue is Guid outboxTenantId)
@@ -182,12 +185,27 @@ public class PeopleFlowDbContext : DbContext
                             $"Cannot persist entity '{entry.Metadata.Name}' with empty TenantId.");
                     }
 
-                    if (_tenantContextAccessor != null && _tenantContextAccessor.TenantId.HasValue && _tenantContextAccessor.TenantId.Value != outboxTenantId)
+                    if (hasActiveTenant && activeTenantId!.Value != outboxTenantId)
                     {
                         throw new InvalidOperationException(
-                            $"Cross-tenant mutation prohibited: Entity TenantId '{outboxTenantId}' does not match active context TenantId '{_tenantContextAccessor.TenantId.Value}'.");
+                            $"Cross-tenant mutation prohibited: Entity TenantId '{outboxTenantId}' does not match active context TenantId '{activeTenantId.Value}'.");
                     }
                 }
+                else if (hasActiveTenant)
+                {
+                    throw new UnauthorizedAccessException(
+                        $"Active tenant context '{activeTenantId}' cannot persist or modify platform-level (null TenantId) OutboxMessage rows.");
+                }
+
+                if ((entry.State == EntityState.Modified || entry.State == EntityState.Deleted) && hasActiveTenant)
+                {
+                    if (tenantProp.OriginalValue is not Guid origOutboxTenant || origOutboxTenant != activeTenantId!.Value)
+                    {
+                        throw new InvalidOperationException(
+                            $"Cross-tenant mutation prohibited: Original TenantId '{tenantProp.OriginalValue}' does not match active context TenantId '{activeTenantId}'.");
+                    }
+                }
+
                 continue;
             }
 
@@ -199,18 +217,24 @@ public class PeopleFlowDbContext : DbContext
                         $"Cannot persist entity '{entry.Metadata.Name}' with empty TenantId.");
                 }
 
-                if (_tenantContextAccessor != null)
+                if (_tenantContextAccessor != null && !hasActiveTenant)
                 {
-                    if (!_tenantContextAccessor.CurrentTenant.HasTenant || !_tenantContextAccessor.TenantId.HasValue)
-                    {
-                        throw new InvalidOperationException(
-                            $"Cannot persist entity '{entry.Metadata.Name}' without an active tenant context.");
-                    }
+                    throw new InvalidOperationException(
+                        $"Cannot persist entity '{entry.Metadata.Name}' without an active tenant context.");
+                }
 
-                    if (_tenantContextAccessor.TenantId.Value != tenantId)
+                if (hasActiveTenant && activeTenantId!.Value != tenantId)
+                {
+                    throw new InvalidOperationException(
+                        $"Cross-tenant mutation prohibited: Entity TenantId '{tenantId}' does not match active context TenantId '{activeTenantId.Value}'.");
+                }
+
+                if ((entry.State == EntityState.Modified || entry.State == EntityState.Deleted) && hasActiveTenant)
+                {
+                    if (tenantProp.OriginalValue is not Guid origTenantId || origTenantId != activeTenantId!.Value)
                     {
                         throw new InvalidOperationException(
-                            $"Cross-tenant mutation prohibited: Entity TenantId '{tenantId}' does not match active context TenantId '{_tenantContextAccessor.TenantId.Value}'.");
+                            $"Cross-tenant mutation prohibited: Original TenantId '{tenantProp.OriginalValue}' does not match active context TenantId '{activeTenantId}'.");
                     }
                 }
             }

@@ -38,7 +38,8 @@ export function registerMemoryWipeListener(listener: MemoryWipeListener): () => 
  * and enforces browser storage hygiene (no tokens or PII in localStorage/sessionStorage).
  */
 export function wipeTenantCache(): void {
-  // 1. Purge all query and mutation caches in TanStack Query
+  // 1. Cancel any in-flight queries and purge all query/mutation caches in TanStack Query
+  void queryClient.cancelQueries();
   queryClient.clear();
 
   // 2. Clear CSRF token cache

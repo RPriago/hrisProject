@@ -27,23 +27,50 @@ export function RoleDemoModal({
   initialRole,
 }: RoleDemoModalProps) {
   const { availableDemoRoles, login } = useAuth();
-  const demoUsers = Object.values(availableDemoRoles);
+  const demoUsers = Object.values(availableDemoRoles).filter((u): u is UserProfile => Boolean(u));
   const [copiedRole, setCopiedRole] = useState<string | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (isOpen) {
+      previousFocusRef.current = document.activeElement as HTMLElement | null;
       closeBtnRef.current?.focus();
+    } else if (previousFocusRef.current) {
+      previousFocusRef.current.focus();
+      previousFocusRef.current = null;
     }
   }, [isOpen]);
 
   useEffect(() => {
+    if (!isOpen) return;
+
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === 'Escape') {
         onClose();
+        return;
+      }
+
+      if (e.key === 'Tab' && modalRef.current) {
+        const focusable = Array.from(
+          modalRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          )
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     }
+
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
@@ -151,7 +178,7 @@ export function RoleDemoModal({
                       ) : (
                         <>
                           <Copy className="h-3 w-3" />
-                          <span>Copy Credentials</span>
+                          <span>Copy Email</span>
                         </>
                       )}
                     </button>

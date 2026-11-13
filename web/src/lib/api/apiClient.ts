@@ -1,5 +1,52 @@
 import { csrfManager } from './csrf';
 import { parseProblemDetails, ApiClientError } from './problemDetails';
+import { IS_DEMO_MODE } from '../env';
+
+function assertSameOriginApiUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed || /[\u0000-\u001F\u007F]/.test(trimmed) || trimmed.startsWith('//')) {
+    throw new ApiClientError(
+      parseProblemDetails(400, {
+        code: 'INVALID_API_URL',
+        title: 'Invalid API URL',
+        detail: 'Only same-origin HTTP(S) API URLs are permitted.',
+      })
+    );
+  }
+
+  const baseOrigin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'http://localhost';
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed, baseOrigin);
+  } catch {
+    throw new ApiClientError(
+      parseProblemDetails(400, {
+        code: 'INVALID_API_URL',
+        title: 'Invalid API URL',
+        detail: 'Invalid URL format.',
+      })
+    );
+  }
+
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    parsed.origin !== baseOrigin
+  ) {
+    throw new ApiClientError(
+      parseProblemDetails(400, {
+        code: 'CROSS_ORIGIN_BLOCKED',
+        title: 'Blocked Cross-Origin Request',
+        detail: 'ApiClient only permits same-origin HTTP(S) requests.',
+      })
+    );
+  }
+
+  return trimmed;
+}
 
 export interface RequestOptions extends RequestInit {
   idempotencyKey?: string;
@@ -36,29 +83,40 @@ export class ApiClient {
     options: RequestOptions = {},
     isRetry = false
   ): Promise<T> {
+    const safeUrl = assertSameOriginApiUrl(url);
+    const {
+      idempotencyKey,
+      tenantId,
+      correlationId: customCorrelationId,
+      skipCsrf,
+      headers: optionHeaders,
+      credentials,
+      ...fetchOptions
+    } = options;
+
     const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method.toUpperCase());
-    const headers = new Headers(options.headers);
+    const headers = new Headers(optionHeaders);
 
     // 1. Correlation ID
-    const correlationId = options.correlationId || this.generateCorrelationId();
+    const correlationId = customCorrelationId || this.generateCorrelationId();
     if (!headers.has('X-Correlation-Id')) {
       headers.set('X-Correlation-Id', correlationId);
     }
 
     // 2. Anti-CSRF Token for mutations
-    if (isMutation && !options.skipCsrf) {
+    if (isMutation && !skipCsrf) {
       const csrfToken = await csrfManager.getToken();
       headers.set(csrfManager.getHeaderName(), csrfToken);
     }
 
     // 3. Idempotency Key
-    if (options.idempotencyKey) {
-      headers.set('Idempotency-Key', options.idempotencyKey);
+    if (idempotencyKey) {
+      headers.set('Idempotency-Key', idempotencyKey);
     }
 
-    // 4. Tenant Scope (development/testing override or explicit scope)
-    if (options.tenantId) {
-      headers.set('X-Tenant-Id', options.tenantId);
+    // 4. Tenant Scope override only allowed in explicit demo/test mode
+    if (tenantId && IS_DEMO_MODE) {
+      headers.set('X-Tenant-Id', tenantId);
     }
 
     // 5. Body and Content-Type
@@ -79,17 +137,17 @@ export class ApiClient {
     }
 
     const init: RequestInit = {
-      ...options,
+      ...fetchOptions,
       method,
       headers,
       body: serializedBody,
-      credentials: options.credentials || 'include',
+      credentials: credentials || 'include',
     };
 
-    const response = await fetch(url, init);
+    const response = await fetch(safeUrl, init);
 
     // 6. Handle 403 CSRF Retry
-    if (response.status === 403 && !isRetry && isMutation && !options.skipCsrf) {
+    if (response.status === 403 && !isRetry && isMutation && !skipCsrf) {
       const clone = response.clone();
       try {
         const errorData = await clone.json();

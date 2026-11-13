@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState } from 'react';
 import { wipeTenantCache } from '@/lib/queryClient';
 import { apiClient } from '@/lib/api/apiClient';
+import { IS_DEMO_MODE } from '@/lib/env';
 
 export interface TenantInfo {
   id: string;
@@ -15,7 +16,13 @@ export interface TenantInfo {
   storageUsageMb?: number;
 }
 
-export const INITIAL_DEMO_TENANTS: TenantInfo[] = [
+const STATIC_DEMO_ENABLED =
+  import.meta.env.DEV ||
+  import.meta.env.MODE === 'test' ||
+  import.meta.env.VITE_ENABLE_DEMO_MODE === 'true';
+
+export const INITIAL_DEMO_TENANTS: TenantInfo[] = STATIC_DEMO_ENABLED
+  ? [
   {
     id: 'tenant-alpha-id',
     name: 'PT Nusantara Teknologi (Tenant Alpha)',
@@ -46,12 +53,13 @@ export const INITIAL_DEMO_TENANTS: TenantInfo[] = [
     maxEmployeeQuota: 25,
     storageUsageMb: 320,
   },
-];
+]
+  : [];
 
 interface TenantContextValue {
   activeTenant: TenantInfo | null;
   availableTenants: TenantInfo[];
-  subscriptionStatus: 'Active' | 'Trial' | 'PastDue' | 'Suspended';
+  subscriptionStatus: 'Active' | 'Trial' | 'PastDue' | 'Suspended' | 'Unknown';
   isSupportAccess: boolean;
   switchTenant: (tenantId: string) => Promise<void>;
   enableSupportAccess: (minutes?: number) => void;
@@ -62,14 +70,24 @@ const TenantContext = createContext<TenantContextValue | undefined>(undefined);
 
 export function TenantProvider({
   children,
-  initialTenantId = 'tenant-alpha-id',
+  initialTenantId = STATIC_DEMO_ENABLED ? 'tenant-alpha-id' : undefined,
+  demoMode = IS_DEMO_MODE,
+  initialTenants,
+  initialActiveTenant,
 }: {
   children: React.ReactNode;
   initialTenantId?: string;
+  demoMode?: boolean;
+  initialTenants?: TenantInfo[];
+  initialActiveTenant?: TenantInfo | null;
 }) {
-  const [availableTenants] = useState<TenantInfo[]>(INITIAL_DEMO_TENANTS);
+  const [availableTenants] = useState<TenantInfo[]>(
+    () => initialTenants ?? (demoMode ? INITIAL_DEMO_TENANTS : [])
+  );
   const [activeTenant, setActiveTenant] = useState<TenantInfo | null>(() => {
-    return availableTenants.find((t) => t.id === initialTenantId) || availableTenants[0];
+    if (initialActiveTenant !== undefined) return initialActiveTenant;
+    if (!demoMode) return null;
+    return availableTenants.find((t) => t.id === initialTenantId) || availableTenants[0] || null;
   });
 
   const switchTenant = async (tenantId: string) => {
@@ -79,8 +97,11 @@ export function TenantProvider({
     try {
       // 2. Call backend tenant switch endpoint
       await apiClient.post('/api/v1/tenancy/switch-active-tenant', { targetTenantId: tenantId });
-    } catch {
-      // Allow seamless fallback in isolated frontend testing or demo mode
+    } catch (err) {
+      if (!demoMode) {
+        throw err;
+      }
+      // Fallback only permitted in explicit demo or isolated test mode
     }
 
     // 3. Update active tenant context
@@ -91,6 +112,7 @@ export function TenantProvider({
   };
 
   const enableSupportAccess = (minutes = 45) => {
+    if (!demoMode) return;
     if (activeTenant) {
       setActiveTenant({
         ...activeTenant,
@@ -110,7 +132,7 @@ export function TenantProvider({
     }
   };
 
-  const subscriptionStatus = activeTenant?.subscriptionStatus || 'Active';
+  const subscriptionStatus = activeTenant?.subscriptionStatus || 'Unknown';
   const isSupportAccess = !!activeTenant?.isSupportAccess;
 
   return (

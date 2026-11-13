@@ -20,6 +20,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
 
     private sealed class ConnectionRlsState
     {
+        public bool HasSynchronized { get; set; }
         public Guid? LastAppliedTenantId { get; set; }
     }
 
@@ -218,12 +219,11 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
 
     #region Private Command Execution Helpers
 
+    internal interface ITestRlsDbConnection { }
+
     private static bool IsPostgreSqlConnection(DbConnection connection)
     {
-        if (connection == null) return false;
-        var typeName = connection.GetType().Name;
-        return typeName.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) ||
-               typeName.Contains("Spy", StringComparison.OrdinalIgnoreCase);
+        return connection is Npgsql.NpgsqlConnection or ITestRlsDbConnection;
     }
 
     private void SynchronizeTenantSession(DbCommand command)
@@ -241,7 +241,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         var state = _connectionStates.GetOrCreateValue(command.Connection);
         var currentTenantId = _tenantContextAccessor.TenantId;
 
-        if (state.LastAppliedTenantId != currentTenantId)
+        if (!state.HasSynchronized || state.LastAppliedTenantId != currentTenantId)
         {
             var previous = _isApplyingRls.Value;
             _isApplyingRls.Value = true;
@@ -250,12 +250,13 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
                 if (currentTenantId.HasValue && currentTenantId.Value != Guid.Empty)
                 {
                     ExecuteSetConfig(command.Connection, currentTenantId.Value, command.Transaction);
+                    MarkConnectionSynchronized(state, currentTenantId.Value);
                 }
                 else
                 {
                     ExecuteResetConfig(command.Connection, command.Transaction);
+                    MarkConnectionSynchronized(state, null);
                 }
-                state.LastAppliedTenantId = currentTenantId;
             }
             finally
             {
@@ -279,7 +280,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         var state = _connectionStates.GetOrCreateValue(command.Connection);
         var currentTenantId = _tenantContextAccessor.TenantId;
 
-        if (state.LastAppliedTenantId != currentTenantId)
+        if (!state.HasSynchronized || state.LastAppliedTenantId != currentTenantId)
         {
             var previous = _isApplyingRls.Value;
             _isApplyingRls.Value = true;
@@ -288,12 +289,13 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
                 if (currentTenantId.HasValue && currentTenantId.Value != Guid.Empty)
                 {
                     await ExecuteSetConfigAsync(command.Connection, currentTenantId.Value, cancellationToken, command.Transaction).ConfigureAwait(false);
+                    MarkConnectionSynchronized(state, currentTenantId.Value);
                 }
                 else
                 {
                     await ExecuteResetConfigAsync(command.Connection, cancellationToken, command.Transaction).ConfigureAwait(false);
+                    MarkConnectionSynchronized(state, null);
                 }
-                state.LastAppliedTenantId = currentTenantId;
             }
             finally
             {
@@ -317,12 +319,12 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
             if (tenantId.HasValue && tenantId.Value != Guid.Empty)
             {
                 ExecuteSetConfig(connection, tenantId.Value, transaction);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+                MarkConnectionSynchronized(connection, tenantId.Value);
             }
             else
             {
                 ExecuteResetConfig(connection, transaction);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+                MarkConnectionSynchronized(connection, null);
             }
         }
         finally
@@ -349,12 +351,12 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
             if (tenantId.HasValue && tenantId.Value != Guid.Empty)
             {
                 await ExecuteSetConfigAsync(connection, tenantId.Value, cancellationToken, transaction).ConfigureAwait(false);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+                MarkConnectionSynchronized(connection, tenantId.Value);
             }
             else
             {
                 await ExecuteResetConfigAsync(connection, cancellationToken, transaction).ConfigureAwait(false);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+                MarkConnectionSynchronized(connection, null);
             }
         }
         finally
@@ -375,7 +377,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         try
         {
             ExecuteResetSession(connection, transaction);
-            _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+            MarkConnectionSynchronized(connection, null);
         }
         catch
         {
@@ -402,7 +404,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         try
         {
             await ExecuteResetSessionAsync(connection, cancellationToken, transaction).ConfigureAwait(false);
-            _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+            MarkConnectionSynchronized(connection, null);
         }
         catch
         {
@@ -429,12 +431,12 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
             if (tenantId.HasValue && tenantId.Value != Guid.Empty)
             {
                 ExecuteSetConfig(connection, tenantId.Value, transaction: null);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+                MarkConnectionSynchronized(connection, tenantId.Value);
             }
             else
             {
                 ExecuteResetConfig(connection, transaction: null);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+                MarkConnectionSynchronized(connection, null);
             }
         }
         catch
@@ -464,12 +466,12 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
             if (tenantId.HasValue && tenantId.Value != Guid.Empty)
             {
                 await ExecuteSetConfigAsync(connection, tenantId.Value, cancellationToken, transaction: null).ConfigureAwait(false);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+                MarkConnectionSynchronized(connection, tenantId.Value);
             }
             else
             {
                 await ExecuteResetConfigAsync(connection, cancellationToken, transaction: null).ConfigureAwait(false);
-                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+                MarkConnectionSynchronized(connection, null);
             }
         }
         catch
@@ -480,6 +482,15 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         {
             _isApplyingRls.Value = previous;
         }
+    }
+
+    private void MarkConnectionSynchronized(DbConnection connection, Guid? tenantId)
+        => MarkConnectionSynchronized(_connectionStates.GetOrCreateValue(connection), tenantId);
+
+    private static void MarkConnectionSynchronized(ConnectionRlsState state, Guid? tenantId)
+    {
+        state.HasSynchronized = true;
+        state.LastAppliedTenantId = tenantId;
     }
 
     private static void ExecuteSetConfig(DbConnection connection, Guid tenantId, DbTransaction? transaction)

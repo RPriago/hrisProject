@@ -128,6 +128,7 @@ public class Program
                 services.AddSingleton<IClock, SystemClock>();
                 services.AddSingleton<ITenantContextAccessor, AsyncLocalTenantContextAccessor>();
                 services.AddSingleton<ICurrentActorContext, AsyncLocalCurrentActorContext>();
+                services.AddRuntimeLogRedaction();
                 services.AddSingleton<IAuthorizationGuard, FourTierAuthorizationPipeline>();
                 if (hostContext.HostingEnvironment.IsDevelopment() || hostContext.HostingEnvironment.IsEnvironment("Testing"))
                 {

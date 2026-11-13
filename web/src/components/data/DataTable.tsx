@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { ErrorState } from '@/components/ui/ErrorState';
 import { DropdownSelect } from '@/components/ui/DropdownMenu';
 import { type ProblemDetails } from '@/lib/api/problemDetails';
+import { registerMemoryWipeListener } from '@/lib/queryClient';
 import {
   Search,
   ChevronDown,
@@ -59,6 +60,14 @@ export function DataTable<T extends object>({
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(pageSize);
+
+  useEffect(() => {
+    return registerMemoryWipeListener(() => {
+      setSearchTerm('');
+      setDebouncedSearch('');
+      setCurrentPage(1);
+    });
+  }, []);
 
   // Debounce search input (300ms)
   useEffect(() => {
@@ -132,6 +141,7 @@ export function DataTable<T extends object>({
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-text-secondary" />
           <input
             type="text"
+            autoComplete="off"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder={searchPlaceholder}

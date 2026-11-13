@@ -25,11 +25,15 @@ public static class StartupSecurityValidator
         var connectionString = configuration.GetConnectionString("DefaultConnection");
         if (string.IsNullOrWhiteSpace(connectionString) ||
             connectionString.Contains("peopleflow_app_secret", StringComparison.Ordinal) ||
+            connectionString.Contains("postgres_dev_secret", StringComparison.Ordinal) ||
+            connectionString.Contains("peopleflow_migrator_secret", StringComparison.Ordinal) ||
             connectionString.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException(
                 "ConnectionStrings:DefaultConnection must be explicitly configured without default or placeholder credentials in non-development environments.");
         }
+
+        ValidateConnectionStringRole(connectionString);
 
         if (configuration.GetValue<bool>("Security:AllowHeaderContextOverride"))
         {
@@ -41,6 +45,22 @@ public static class StartupSecurityValidator
         {
             throw new InvalidOperationException(
                 "Storage:UseClamAvDaemon must be enabled in non-development environments so malware scanning never falls back to a mock scanner.");
+        }
+
+        if (!configuration.GetValue<bool>("Storage:UseS3"))
+        {
+            throw new InvalidOperationException(
+                "Storage:UseS3 must be enabled in non-development environments so private/quarantine file operations never fall back to no-op in-memory storage.");
+        }
+
+        if (requireWebSecurityOptions)
+        {
+            using var dpCert = DataProtectionCertificateLoader.TryLoadFromConfiguration(configuration);
+            if (dpCert is null)
+            {
+                throw new InvalidOperationException(
+                    "Security:DataProtection:CertificateBase64 or CertificatePath with private key must be configured in non-development environments to protect persisted Data Protection keys.");
+            }
         }
 
         if (!requireWebSecurityOptions)
@@ -79,6 +99,39 @@ public static class StartupSecurityValidator
                 throw new InvalidOperationException(
                     $"Security:Csrf:AllowedOrigins contains insecure or local origin '{origin}' in non-development environment.");
             }
+        }
+    }
+
+    private static void ValidateConnectionStringRole(string connectionString)
+    {
+        try
+        {
+            var csBuilder = new System.Data.Common.DbConnectionStringBuilder
+            {
+                ConnectionString = connectionString
+            };
+
+            string? username = null;
+            if (csBuilder.TryGetValue("Username", out var u1))
+            {
+                username = u1?.ToString();
+            }
+            else if (csBuilder.TryGetValue("User ID", out var u2))
+            {
+                username = u2?.ToString();
+            }
+
+            if (string.Equals(username, "postgres", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(username, "peopleflow_migrator", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"ConnectionStrings:DefaultConnection cannot use privileged role '{username}' outside Development or Testing.");
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            throw new InvalidOperationException(
+                "ConnectionStrings:DefaultConnection could not be parsed safely.", ex);
         }
     }
 }

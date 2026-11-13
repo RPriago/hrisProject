@@ -44,7 +44,7 @@ public class TenantResolutionMiddleware
 
             if (Guid.TryParse(rawClaimTenantId, out var claimTenantId) && claimTenantId != Guid.Empty)
             {
-                var subscriptionStatus = context.User.FindFirst("subscription_status")?.Value ?? "Active";
+                var subscriptionStatus = context.User.FindFirst("subscription_status")?.Value ?? string.Empty;
                 var isSupportAccess = bool.TryParse(context.User.FindFirst("is_support_access")?.Value, out var support) && support;
                 tenantAccessor.SetTenantContext(new TenantContext(claimTenantId, subscriptionStatus, isSupportAccess));
             }

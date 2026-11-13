@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Topbar } from '@/components/layout/Topbar';
 import { SystemStatusBanner } from '@/components/layout/SystemStatusBanner';
+import { useAuth } from '@/context/AuthContext';
+import { useTenant } from '@/context/TenantContext';
 import { cn } from '@/lib/utils';
 import { X } from 'lucide-react';
 
@@ -18,7 +20,10 @@ export function AppShell({
   onNavigate,
   className,
 }: AppShellProps) {
+  const { user } = useAuth();
+  const { activeTenant } = useTenant();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const workspaceContextKey = `${user?.id ?? 'anon'}:${activeTenant?.id ?? 'none'}`;
 
   return (
     <div className={cn('min-h-screen h-screen flex flex-col bg-white text-text-primary antialiased overflow-hidden', className)}>
@@ -72,7 +77,7 @@ export function AppShell({
 
           {/* Main Scrollable Viewport: Inset Canvas with Curved Corner (rounded-tl-[32px]) */}
           <main className="flex-1 overflow-y-auto bg-[#F4F6F9] md:rounded-tl-[32px] p-4 sm:p-5 lg:p-6 border-t border-l border-[#ECEEF2]/70 shadow-2xs">
-            <div className="w-full space-y-5 sm:space-y-6">
+            <div key={workspaceContextKey} className="w-full space-y-5 sm:space-y-6">
               {children}
             </div>
           </main>

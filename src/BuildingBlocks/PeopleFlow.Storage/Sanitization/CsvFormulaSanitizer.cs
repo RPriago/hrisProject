@@ -17,32 +17,35 @@ public class CsvFormulaSanitizer : ICsvFormulaSanitizer
             return string.Empty;
         }
 
-        // Count leading spaces (preserve original whitespace if non-formula)
-        var leadingSpaceCount = 0;
-        while (leadingSpaceCount < input.Length && input[leadingSpaceCount] == ' ')
+        // Advance past non-trigger whitespace/control/BOM characters (e.g. ' ', '\n', '\v', '\f', NBSP, U+FEFF)
+        // while stopping immediately if an explicit formula trigger ('\t', '\r', '=', '+', '-', '@') is reached.
+        var leadingIdx = 0;
+        while (leadingIdx < input.Length &&
+               !FormulaTriggers.Contains(input[leadingIdx]) &&
+               (input[leadingIdx] <= ' ' || char.IsWhiteSpace(input[leadingIdx]) || input[leadingIdx] == '\uFEFF'))
         {
-            leadingSpaceCount++;
+            leadingIdx++;
         }
 
-        if (leadingSpaceCount == input.Length)
+        if (leadingIdx == input.Length)
         {
-            // All spaces
             return input;
         }
 
-        var firstNonSpace = input[leadingSpaceCount];
+        var firstTriggerCandidate = input[leadingIdx];
         var candidate = input;
 
-        if (FormulaTriggers.Contains(firstNonSpace))
+        if (FormulaTriggers.Contains(firstTriggerCandidate))
         {
             // Only '+' and '-' can be numeric literals.
             // '=', '@', '\t', '\r' are ALWAYS formulas and must be prepended with '''.
-            var isNumeric = (firstNonSpace == '+' || firstNonSpace == '-')
-                && IsNumericLiteral(input[leadingSpaceCount..]);
+            var slice = input[leadingIdx..];
+            var isNumeric = (firstTriggerCandidate == '+' || firstTriggerCandidate == '-')
+                && IsNumericLiteral(slice);
 
             if (!isNumeric)
             {
-                candidate = "'" + input[leadingSpaceCount..];
+                candidate = "'" + slice;
             }
         }
 

@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useTenant } from '@/context/TenantContext';
+import { registerMemoryWipeListener } from '@/lib/queryClient';
 import { SparklineKpiCard } from '@/components/dashboard/SparklineKpiCard';
 import { ProportionalBarCard } from '@/components/dashboard/ProportionalBarCard';
 import { SingleFocusBarCard } from '@/components/dashboard/SingleFocusBarCard';
 import { CompactActionTableCard } from '@/components/dashboard/CompactActionTableCard';
 import { StackedQueueRail } from '@/components/dashboard/StackedQueueRail';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, ShieldAlert, Clock, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export interface DashboardPageProps {
@@ -15,11 +16,91 @@ export interface DashboardPageProps {
 
 export function DashboardPage({ className }: DashboardPageProps) {
   const { user } = useAuth();
-  const { activeTenant } = useTenant();
+  const { activeTenant, isSupportAccess } = useTenant();
   const [selectedActionMessage, setSelectedActionMessage] = useState<string | null>(null);
 
-  const role = user?.role || 'HrAdmin';
+  useEffect(() => {
+    return registerMemoryWipeListener(() => {
+      setSelectedActionMessage(null);
+    });
+  }, []);
+
+  if (!user) {
+    return (
+      <div className={cn('p-6 rounded-2xl bg-white border border-[#ECEEF2] shadow-xs', className)}>
+        <h2 className="text-base font-semibold text-slate-900">Sesi Tidak Aktif</h2>
+        <p className="mt-1 text-sm text-slate-600">
+          Silakan masuk terlebih dahulu untuk mengakses ruang kerja tenant.
+        </p>
+      </div>
+    );
+  }
+
+  const role = user.role;
   const isPayrollOfficer = role === 'PayrollOfficer';
+
+  if (role === 'PlatformAdmin' && !isSupportAccess) {
+    return (
+      <div className={cn('space-y-5', className)} data-testid="platform-ops-overview">
+        <div className="p-6 rounded-2xl bg-white border border-[#ECEEF2] shadow-xs space-y-2">
+          <div className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700">
+            <ShieldAlert className="h-4 w-4 text-amber-text" />
+            <span>Platform Operations Overview</span>
+          </div>
+          <h2 className="text-lg font-semibold text-slate-900">
+            Vendor Tenant Isolation Active
+          </h2>
+          <p className="text-sm text-slate-600">
+            Data finansial dan payroll tenant disembunyikan hingga Support Access Grant resmi diaktifkan untuk sesi investigasi teknis.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (role === 'Employee' || user.dataScope === 'Self') {
+    return (
+      <div className={cn('grid grid-cols-1 md:grid-cols-2 gap-5', className)} data-testid="employee-self-service">
+        <div className="p-6 rounded-2xl bg-white border border-[#ECEEF2] shadow-xs space-y-2">
+          <div className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+            <Clock className="h-4 w-4 text-blue-600" />
+            <span>My Workspace (Self)</span>
+          </div>
+          <h2 className="text-lg font-semibold text-slate-900">Ringkasan Kehadiran Saya</h2>
+          <p className="text-sm text-slate-600">
+            Menampilkan catatan absensi, saldo cuti, dan pengajuan lembur pribadi Anda pada entitas aktif.
+          </p>
+        </div>
+        <div className="p-6 rounded-2xl bg-white border border-[#ECEEF2] shadow-xs space-y-2">
+          <div className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+            <FileText className="h-4 w-4 text-emerald-600" />
+            <span>Slip Gaji Digital (Self)</span>
+          </div>
+          <h2 className="text-lg font-semibold text-slate-900">Slip Gaji & Pajak Pribadi</h2>
+          <p className="text-sm text-slate-600">
+            Akses slip gaji dan bukti potong PPh 21 pribadi secara terenkripsi.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (role === 'Manager' || user.dataScope === 'DirectReports' || user.dataScope === 'Team') {
+    return (
+      <div className={cn('space-y-5', className)} data-testid="manager-team-scope">
+        <div className="p-6 rounded-2xl bg-white border border-[#ECEEF2] shadow-xs space-y-2">
+          <h2 className="text-lg font-semibold text-slate-900">
+            Persetujuan Tim & Lembur ({user.dataScope})
+          </h2>
+          <p className="text-sm text-slate-600">
+            Ringkasan kehadiran, cuti, dan persetujuan lembur khusus bawahan langsung pada ruang lingkup tim Anda.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const canMutateSchedules = role !== 'Auditor' && activeTenant?.subscriptionStatus !== 'PastDue';
 
   return (
     <div className={cn('space-y-5', className)}>
@@ -78,7 +159,11 @@ export function DashboardPage({ className }: DashboardPageProps) {
         <div className="lg:col-span-4 flex flex-col">
           <StackedQueueRail
             title="Upcoming Bill & Payment"
-            onAddNew={() => setSelectedActionMessage('New scheduled payroll reminder added.')}
+            onAddNew={
+              canMutateSchedules
+                ? () => setSelectedActionMessage('New scheduled payroll reminder added.')
+                : undefined
+            }
             onManage={() => setSelectedActionMessage('Opening Bills & Payments module (4 active scheduled obligations)...')}
             className="h-full"
           />

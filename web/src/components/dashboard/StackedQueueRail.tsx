@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Plus, ChevronRight, ArrowRight } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
-import { cn } from '@/lib/utils';
+import { cn, sanitizeSafeAssetUrl } from '@/lib/utils';
+import { registerMemoryWipeListener } from '@/lib/queryClient';
 
 export interface ScheduleItem {
   id: string;
@@ -66,6 +67,12 @@ export function StackedQueueRail({
 }: StackedQueueRailProps) {
   const [selectedItem, setSelectedItem] = useState<string | null>(null);
 
+  useEffect(() => {
+    return registerMemoryWipeListener(() => {
+      setSelectedItem(null);
+    });
+  }, []);
+
   const totalScheduledLabel = (() => {
     const sum = items.reduce((acc, item) => {
       const numeric = Number(item.amount.replace(/[^0-9]/g, ''));
@@ -125,7 +132,16 @@ export function StackedQueueRail({
                     item.logoBg
                   )}
                 >
-                  <img src={item.logo} alt="" className="max-h-7 max-w-full object-contain" />
+                  {(() => {
+                    const safeLogoUrl = sanitizeSafeAssetUrl(item.logo);
+                    return safeLogoUrl ? (
+                      <img src={safeLogoUrl} alt="" className="max-h-7 max-w-full object-contain" />
+                    ) : (
+                      <span className="text-xs font-semibold text-slate-500">
+                        {item.title.slice(0, 2).toUpperCase()}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <div className="min-w-0">
                   <h4 className="text-sm font-semibold text-slate-900 truncate group-hover:text-blue-600 transition-colors">

@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="PeopleFlow.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\PeopleFlow.Kernel\PeopleFlow.Kernel.csproj" />
   </ItemGroup>
 

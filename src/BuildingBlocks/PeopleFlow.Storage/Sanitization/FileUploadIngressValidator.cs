@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text;
 
 namespace PeopleFlow.Storage.Sanitization;
@@ -72,6 +73,32 @@ public static class FileUploadIngressValidator
         return cleaned;
     }
 
+    /// <summary>
+    /// Returns the first blocked dangerous extension segment found in <paramref name="fileName"/>, if any.
+    /// </summary>
+    public static string? FindDangerousExtension(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return null;
+        }
+
+        var segments = fileName.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        var leaf = segments.Length > 0 ? segments[^1] : fileName;
+        var fileSegments = leaf.Split('.', StringSplitOptions.RemoveEmptyEntries);
+
+        for (var i = 1; i < fileSegments.Length; i++)
+        {
+            var extSegment = "." + fileSegments[i];
+            if (DangerousExtensions.Contains(extSegment))
+            {
+                return extSegment;
+            }
+        }
+
+        return null;
+    }
+
     public static void ValidateAndInspectHeader(
         string sanitizedFileName,
         string contentType,
@@ -85,20 +112,16 @@ public static class FileUploadIngressValidator
             throw new InvalidOperationException("Uploaded file payload must not be empty.");
         }
 
+        if (FindDangerousExtension(sanitizedFileName) is { } blockedExt)
+        {
+            throw new InvalidOperationException(
+                $"Uploaded file extension '{blockedExt}' is blocked for security reasons.");
+        }
+
         var fileSegments = sanitizedFileName.Split('.', StringSplitOptions.RemoveEmptyEntries);
         if (fileSegments.Length < 2)
         {
             throw new InvalidOperationException("Uploaded filename must include a valid allowed extension.");
-        }
-
-        for (var i = 1; i < fileSegments.Length; i++)
-        {
-            var extSegment = "." + fileSegments[i];
-            if (DangerousExtensions.Contains(extSegment))
-            {
-                throw new InvalidOperationException(
-                    $"Uploaded file extension '{extSegment}' is blocked for security reasons.");
-            }
         }
 
         var extension = "." + fileSegments[^1];
@@ -162,11 +185,31 @@ public static class FileUploadIngressValidator
             ".webp" => payload.Length >= 12 &&
                       payload[0] == 0x52 && payload[1] == 0x49 && payload[2] == 0x46 && payload[3] == 0x46 &&
                       payload[8] == 0x57 && payload[9] == 0x45 && payload[10] == 0x42 && payload[11] == 0x50,
-            ".xlsx" or ".docx" => payload.Length >= 4 &&
-                      payload[0] == 0x50 && payload[1] == 0x4B &&
-                      ((payload[2] == 0x03 && payload[3] == 0x04) || (payload[2] == 0x05 && payload[3] == 0x06)),
+            ".xlsx" or ".docx" => HasOpenXmlContentTypes(payload),
             ".csv" or ".txt" => !payload.Contains((byte)0),
             _ => false
         };
+    }
+
+    private static bool HasOpenXmlContentTypes(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 4 ||
+            payload[0] != 0x50 || payload[1] != 0x4B ||
+            payload[2] != 0x03 || payload[3] != 0x04)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var ms = new MemoryStream(payload.ToArray(), writable: false);
+            using var archive = new ZipArchive(ms, ZipArchiveMode.Read, leaveOpen: false);
+            return archive.Entries.Any(entry =>
+                string.Equals(entry.FullName, "[Content_Types].xml", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
     }
 }

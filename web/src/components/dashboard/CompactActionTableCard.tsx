@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { SlidersHorizontal, MoreHorizontal, ListFilter, CheckCircle2, Clock } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, sanitizeSafeAssetUrl } from '@/lib/utils';
+import { registerMemoryWipeListener } from '@/lib/queryClient';
 import { Badge, type BadgeVariant } from '@/components/ui/Badge';
 import { DropdownSelect } from '@/components/ui/DropdownMenu';
 
@@ -55,6 +56,13 @@ export function CompactActionTableCard({
 }: CompactActionTableCardProps) {
   const [filter, setFilter] = useState<'All' | 'Success' | 'Pending'>('All');
   const [activeActionId, setActiveActionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    return registerMemoryWipeListener(() => {
+      setFilter('All');
+      setActiveActionId(null);
+    });
+  }, []);
 
   const defaultActivities: ActionTableRow[] = [
     {
@@ -155,7 +163,9 @@ export function CompactActionTableCard({
 
           {/* Table Rows */}
           <div className="divide-y divide-slate-100">
-            {filteredItems.map((item) => (
+            {filteredItems.map((item) => {
+              const safeLogoUrl = sanitizeSafeAssetUrl(item.logo);
+              return (
               <div
                 key={item.id}
                 className="px-3.5 py-2.5 rounded-xl hover:bg-slate-50/80 transition-colors grid grid-cols-[minmax(0,1.6fr)_92px_136px_minmax(136px,auto)] gap-2.5 sm:gap-3 items-center"
@@ -168,8 +178,8 @@ export function CompactActionTableCard({
                       item.logoBg || 'bg-transparent border-[#E2E8F0]'
                     )}
                   >
-                    {item.logo ? (
-                      <img src={item.logo} alt="" className="max-h-5 max-w-full object-contain" />
+                    {safeLogoUrl ? (
+                      <img src={safeLogoUrl} alt="" className="max-h-5 max-w-full object-contain" />
                     ) : (
                       <span className="text-xs font-semibold text-slate-500">
                         {(item.primaryText || item.name || 'TX').slice(0, 2).toUpperCase()}
@@ -217,7 +227,8 @@ export function CompactActionTableCard({
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>

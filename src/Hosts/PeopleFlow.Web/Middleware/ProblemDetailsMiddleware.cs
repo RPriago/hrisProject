@@ -27,7 +27,12 @@ public class ProblemDetailsMiddleware
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unhandled exception caught by ProblemDetailsMiddleware.");
+            var sanitizedSummary = PeopleFlow.Security.Redaction.SensitiveDataRedactor.SanitizeExceptionSummary(ex);
+            _logger.LogError(
+                "Unhandled exception caught by ProblemDetailsMiddleware for {Method} {Path}: {ExceptionSummary}",
+                context.Request.Method,
+                context.Request.Path.Value ?? "/",
+                sanitizedSummary);
             await HandleExceptionAsync(context, ex);
         }
     }
