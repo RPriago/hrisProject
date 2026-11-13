@@ -7,6 +7,8 @@ namespace PeopleFlow.Security.Csrf;
 public sealed class CsrfValidationOptions
 {
     public ISet<string> AllowedOrigins { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    public bool AllowSelfOriginFallback { get; set; } = false;
+    public bool RequireTokenWhenSessionCookieAbsent { get; set; } = true;
     public string HeaderName { get; set; } = "X-CSRF-Token";
     public string CookieName { get; set; } = SessionCookieConfig.CookieName;
     public ISet<string> ExemptPaths { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -50,8 +52,10 @@ public sealed class CsrfValidationMiddleware
         }
 
         // 2. Cookie Session Anti-CSRF Token Verification
-        if (context.Request.Cookies.TryGetValue(_options.CookieName, out var sessionId) &&
-            !string.IsNullOrWhiteSpace(sessionId))
+        var hasSessionCookie = context.Request.Cookies.TryGetValue(_options.CookieName, out var sessionId) &&
+            !string.IsNullOrWhiteSpace(sessionId);
+
+        if (hasSessionCookie)
         {
             if (!context.Request.Headers.TryGetValue(_options.HeaderName, out var tokenValues) ||
                 string.IsNullOrWhiteSpace(tokenValues.FirstOrDefault()))
@@ -67,9 +71,18 @@ public sealed class CsrfValidationMiddleware
                 return;
             }
         }
+        else if (_options.RequireTokenWhenSessionCookieAbsent && !IsStatelessBearerAuthenticated(context))
+        {
+            await RejectAsync(context, "CSRF_TOKEN_MISSING", "Anti-CSRF session cookie and 'X-CSRF-Token' header are required for mutating requests.");
+            return;
+        }
 
         await _next(context);
     }
+
+    private static bool IsStatelessBearerAuthenticated(HttpContext context) =>
+        context.User.Identity?.IsAuthenticated == true &&
+        string.Equals(context.User.Identity.AuthenticationType, "Bearer", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsSafeMethod(string method)
     {
@@ -88,26 +101,47 @@ public sealed class CsrfValidationMiddleware
         }
 
         var referer = context.Request.Headers.Referer.FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(referer) &&
-            Uri.TryCreate(referer, UriKind.Absolute, out var refererUri))
+        if (!string.IsNullOrWhiteSpace(referer))
         {
-            var refererOrigin = $"{refererUri.Scheme}://{refererUri.Authority}";
-            return MatchesAllowedOrSelf(refererOrigin, context);
+            return MatchesAllowedOrSelf(referer, context);
         }
 
         // If neither Origin nor Referer is sent, fail-closed for cookie-authenticated mutations.
         return false;
     }
 
-    private bool MatchesAllowedOrSelf(string origin, HttpContext context)
+    private bool MatchesAllowedOrSelf(string rawOriginOrReferer, HttpContext context)
     {
-        if (_options.AllowedOrigins.Contains(origin))
+        if (string.Equals(rawOriginOrReferer.Trim(), "null", StringComparison.OrdinalIgnoreCase) ||
+            !Uri.TryCreate(rawOriginOrReferer, UriKind.Absolute, out var parsedUri))
+        {
+            return false;
+        }
+
+        if (!string.Equals(parsedUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(parsedUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(parsedUri.UserInfo))
+        {
+            return false;
+        }
+
+        var normalizedOrigin = $"{parsedUri.Scheme}://{parsedUri.Authority}";
+        if (_options.AllowedOrigins.Contains(normalizedOrigin))
         {
             return true;
         }
 
+        if (!_options.AllowSelfOriginFallback)
+        {
+            return false;
+        }
+
         var requestOrigin = $"{context.Request.Scheme}://{context.Request.Host.Value}";
-        return string.Equals(origin, requestOrigin, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(normalizedOrigin, requestOrigin, StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task RejectAsync(HttpContext context, string code, string message)

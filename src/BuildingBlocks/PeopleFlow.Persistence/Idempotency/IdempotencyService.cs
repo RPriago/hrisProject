@@ -41,17 +41,14 @@ public class IdempotencyService : IIdempotencyService
             throw new InvalidOperationException("Cannot process idempotency record for a different tenant than the active ambient tenant.");
         }
 
-        var effectiveTenantId = tenantId ?? _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId ?? Guid.Empty;
+        var effectiveTenantId = ResolveEffectiveTenantId(tenantId);
         var effectiveActorUserId = actorUserId ?? Guid.Empty;
 
-        using var tenantScope = (_tenantContextAccessor != null && effectiveTenantId != Guid.Empty)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(effectiveTenantId, "Active"))
-            : null;
+        using var tenantScope = _dbContext.BeginOperationTenantScope(effectiveTenantId);
         var requestHash = ComputeRequestHash(requestPayload);
         var now = _clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
         var existing = await _dbContext.IdempotencyRecords
-            .IgnoreQueryFilters()
             .FirstOrDefaultAsync(r =>
                 r.TenantId == effectiveTenantId &&
                 r.ActorUserId == effectiveActorUserId &&
@@ -62,14 +59,22 @@ public class IdempotencyService : IIdempotencyService
         {
             if (existing.ExpiresAtUtc <= now)
             {
-                // Expired: reset and re-execute
+                // Expired: reset and re-execute (optimistic concurrency guards racing workers)
                 existing.Status = IdempotencyStatus.InProgress;
                 existing.RequestHash = requestHash;
                 existing.ResponseStatusCode = null;
                 existing.ResponseBodyJson = null;
                 existing.ExpiresAtUtc = now.AddHours(24);
-                await SaveChangesInTenantScopeAsync(effectiveTenantId, cancellationToken);
-                return IdempotencyResolution.CanExecute();
+                try
+                {
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return IdempotencyResolution.CanExecute();
+                }
+                catch (DbUpdateConcurrencyException)
+                {
+                    _dbContext.Entry(existing).State = EntityState.Detached;
+                    return IdempotencyResolution.Conflict();
+                }
             }
 
             if (string.Equals(existing.Status, IdempotencyStatus.Completed, StringComparison.OrdinalIgnoreCase))
@@ -92,8 +97,16 @@ public class IdempotencyService : IIdempotencyService
                 }
 
                 existing.Status = IdempotencyStatus.InProgress;
-                await SaveChangesInTenantScopeAsync(effectiveTenantId, cancellationToken);
-                return IdempotencyResolution.CanExecute();
+                try
+                {
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return IdempotencyResolution.CanExecute();
+                }
+                catch (DbUpdateConcurrencyException)
+                {
+                    _dbContext.Entry(existing).State = EntityState.Detached;
+                    return IdempotencyResolution.Conflict();
+                }
             }
 
             // InProgress
@@ -116,7 +129,7 @@ public class IdempotencyService : IIdempotencyService
 
         try
         {
-            await SaveChangesInTenantScopeAsync(effectiveTenantId, cancellationToken);
+            await _dbContext.SaveChangesAsync(cancellationToken);
             return IdempotencyResolution.CanExecute();
         }
         catch (DbUpdateException)
@@ -125,7 +138,6 @@ public class IdempotencyService : IIdempotencyService
             _dbContext.Entry(newRecord).State = EntityState.Detached;
 
             var collision = await _dbContext.IdempotencyRecords
-                .IgnoreQueryFilters()
                 .AsNoTracking()
                 .FirstOrDefaultAsync(r =>
                     r.TenantId == effectiveTenantId &&
@@ -168,15 +180,12 @@ public class IdempotencyService : IIdempotencyService
             throw new InvalidOperationException("Cannot process idempotency record for a different tenant than the active ambient tenant.");
         }
 
-        var effectiveTenantId = tenantId ?? _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId ?? Guid.Empty;
+        var effectiveTenantId = ResolveEffectiveTenantId(tenantId);
         var effectiveActorUserId = actorUserId ?? Guid.Empty;
 
-        using var tenantScope = (_tenantContextAccessor != null && effectiveTenantId != Guid.Empty)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(effectiveTenantId, "Active"))
-            : null;
+        using var tenantScope = _dbContext.BeginOperationTenantScope(effectiveTenantId);
 
         var record = await _dbContext.IdempotencyRecords
-            .IgnoreQueryFilters()
             .FirstOrDefaultAsync(r =>
                 r.TenantId == effectiveTenantId &&
                 r.ActorUserId == effectiveActorUserId &&
@@ -188,7 +197,7 @@ public class IdempotencyService : IIdempotencyService
             record.Status = IdempotencyStatus.Completed;
             record.ResponseStatusCode = statusCode;
             record.ResponseBodyJson = responseBody;
-            await SaveChangesInTenantScopeAsync(effectiveTenantId, cancellationToken);
+            await _dbContext.SaveChangesAsync(cancellationToken);
         }
     }
 
@@ -209,15 +218,12 @@ public class IdempotencyService : IIdempotencyService
         // Clear any dirty entities tracked from failed action execution
         _dbContext.ChangeTracker.Clear();
 
-        var effectiveTenantId = tenantId ?? _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId ?? Guid.Empty;
+        var effectiveTenantId = ResolveEffectiveTenantId(tenantId);
         var effectiveActorUserId = actorUserId ?? Guid.Empty;
 
-        using var tenantScope = (_tenantContextAccessor != null && effectiveTenantId != Guid.Empty)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(effectiveTenantId, "Active"))
-            : null;
+        using var tenantScope = _dbContext.BeginOperationTenantScope(effectiveTenantId);
 
         var record = await _dbContext.IdempotencyRecords
-            .IgnoreQueryFilters()
             .FirstOrDefaultAsync(r =>
                 r.TenantId == effectiveTenantId &&
                 r.ActorUserId == effectiveActorUserId &&
@@ -227,26 +233,19 @@ public class IdempotencyService : IIdempotencyService
         if (record != null)
         {
             record.Status = IdempotencyStatus.FailedRetriable;
-            await SaveChangesInTenantScopeAsync(effectiveTenantId, cancellationToken);
+            await _dbContext.SaveChangesAsync(cancellationToken);
         }
     }
 
-    private async Task SaveChangesInTenantScopeAsync(Guid tenantId, CancellationToken cancellationToken)
+    private Guid ResolveEffectiveTenantId(Guid? tenantId)
     {
-        IDisposable? tenantScope = null;
-        if (!_dbContext.CurrentTenantId.HasValue && _tenantContextAccessor != null && tenantId != Guid.Empty)
+        var effectiveTenantId = tenantId ?? _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
+        if (!effectiveTenantId.HasValue || effectiveTenantId.Value == Guid.Empty)
         {
-            tenantScope = _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"));
+            throw new UnauthorizedAccessException("Active tenant context is required for idempotency operations.");
         }
 
-        try
-        {
-            await _dbContext.SaveChangesAsync(cancellationToken);
-        }
-        finally
-        {
-            tenantScope?.Dispose();
-        }
+        return effectiveTenantId.Value;
     }
 
     public string ComputeRequestHash(string requestBody)

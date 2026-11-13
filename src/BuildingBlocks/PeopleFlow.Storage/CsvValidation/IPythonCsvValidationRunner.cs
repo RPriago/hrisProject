@@ -33,6 +33,9 @@ public class CsvValidationReport
 
     [JsonPropertyName("errors")]
     public List<CsvRowError> Errors { get; set; } = new();
+
+    [JsonPropertyName("errors_truncated")]
+    public bool ErrorsTruncated { get; set; }
 }
 
 public class CsvValidationResult
@@ -58,6 +61,7 @@ public class PythonCsvValidationOptions
     public string PythonExecutablePath { get; set; } = "python3";
     public string? ValidatorScriptPath { get; set; }
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
+    public long MaxInputCsvBytes { get; set; } = 25 * 1024 * 1024; // 25 MB
 }
 
 public interface IPythonCsvValidationRunner

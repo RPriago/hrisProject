@@ -16,6 +16,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
 {
     private readonly ITenantContextAccessor _tenantContextAccessor;
     private readonly ConditionalWeakTable<DbConnection, ConnectionRlsState> _connectionStates = new();
+    private readonly AsyncLocal<bool> _isApplyingRls = new();
 
     private sealed class ConnectionRlsState
     {
@@ -227,7 +228,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
 
     private void SynchronizeTenantSession(DbCommand command)
     {
-        if (command?.Connection == null || command.Connection.State != ConnectionState.Open || !IsPostgreSqlConnection(command.Connection))
+        if (_isApplyingRls.Value || command?.Connection == null || command.Connection.State != ConnectionState.Open || !IsPostgreSqlConnection(command.Connection))
         {
             return;
         }
@@ -242,21 +243,30 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
 
         if (state.LastAppliedTenantId != currentTenantId)
         {
-            if (currentTenantId.HasValue && currentTenantId.Value != Guid.Empty)
+            var previous = _isApplyingRls.Value;
+            _isApplyingRls.Value = true;
+            try
             {
-                ExecuteSetConfig(command.Connection, currentTenantId.Value, command.Transaction);
+                if (currentTenantId.HasValue && currentTenantId.Value != Guid.Empty)
+                {
+                    ExecuteSetConfig(command.Connection, currentTenantId.Value, command.Transaction);
+                }
+                else
+                {
+                    ExecuteResetConfig(command.Connection, command.Transaction);
+                }
+                state.LastAppliedTenantId = currentTenantId;
             }
-            else
+            finally
             {
-                ExecuteResetConfig(command.Connection, command.Transaction);
+                _isApplyingRls.Value = previous;
             }
-            state.LastAppliedTenantId = currentTenantId;
         }
     }
 
     private async Task SynchronizeTenantSessionAsync(DbCommand command, CancellationToken cancellationToken)
     {
-        if (command?.Connection == null || command.Connection.State != ConnectionState.Open || !IsPostgreSqlConnection(command.Connection))
+        if (_isApplyingRls.Value || command?.Connection == null || command.Connection.State != ConnectionState.Open || !IsPostgreSqlConnection(command.Connection))
         {
             return;
         }
@@ -271,35 +281,53 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
 
         if (state.LastAppliedTenantId != currentTenantId)
         {
-            if (currentTenantId.HasValue && currentTenantId.Value != Guid.Empty)
+            var previous = _isApplyingRls.Value;
+            _isApplyingRls.Value = true;
+            try
             {
-                await ExecuteSetConfigAsync(command.Connection, currentTenantId.Value, cancellationToken, command.Transaction).ConfigureAwait(false);
+                if (currentTenantId.HasValue && currentTenantId.Value != Guid.Empty)
+                {
+                    await ExecuteSetConfigAsync(command.Connection, currentTenantId.Value, cancellationToken, command.Transaction).ConfigureAwait(false);
+                }
+                else
+                {
+                    await ExecuteResetConfigAsync(command.Connection, cancellationToken, command.Transaction).ConfigureAwait(false);
+                }
+                state.LastAppliedTenantId = currentTenantId;
             }
-            else
+            finally
             {
-                await ExecuteResetConfigAsync(command.Connection, cancellationToken, command.Transaction).ConfigureAwait(false);
+                _isApplyingRls.Value = previous;
             }
-            state.LastAppliedTenantId = currentTenantId;
         }
     }
 
     private void ApplyTenantSession(DbConnection connection, DbTransaction? transaction = null)
     {
-        if (connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
         {
             return;
         }
 
-        var tenantId = _tenantContextAccessor.TenantId;
-        if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
+        try
         {
-            ExecuteSetConfig(connection, tenantId.Value, transaction);
-            _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+            var tenantId = _tenantContextAccessor.TenantId;
+            if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+            {
+                ExecuteSetConfig(connection, tenantId.Value, transaction);
+                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+            }
+            else
+            {
+                ExecuteResetConfig(connection, transaction);
+                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+            }
         }
-        else
+        finally
         {
-            ExecuteResetConfig(connection, transaction);
-            _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+            _isApplyingRls.Value = previous;
         }
     }
 
@@ -308,31 +336,42 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         CancellationToken cancellationToken,
         DbTransaction? transaction = null)
     {
-        if (connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
         {
             return;
         }
 
-        var tenantId = _tenantContextAccessor.TenantId;
-        if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
+        try
         {
-            await ExecuteSetConfigAsync(connection, tenantId.Value, cancellationToken, transaction).ConfigureAwait(false);
-            _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+            var tenantId = _tenantContextAccessor.TenantId;
+            if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+            {
+                await ExecuteSetConfigAsync(connection, tenantId.Value, cancellationToken, transaction).ConfigureAwait(false);
+                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = tenantId.Value;
+            }
+            else
+            {
+                await ExecuteResetConfigAsync(connection, cancellationToken, transaction).ConfigureAwait(false);
+                _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+            }
         }
-        else
+        finally
         {
-            await ExecuteResetConfigAsync(connection, cancellationToken, transaction).ConfigureAwait(false);
-            _connectionStates.GetOrCreateValue(connection).LastAppliedTenantId = null;
+            _isApplyingRls.Value = previous;
         }
     }
 
     private void ResetTenantSession(DbConnection connection, DbTransaction? transaction = null)
     {
-        if (connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
         {
             return;
         }
 
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
         try
         {
             ExecuteResetSession(connection, transaction);
@@ -342,6 +381,10 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         {
             // Suppress exception on cleanup during connection closing or failed rollback
         }
+        finally
+        {
+            _isApplyingRls.Value = previous;
+        }
     }
 
     private async Task ResetTenantSessionAsync(
@@ -349,11 +392,13 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         CancellationToken cancellationToken,
         DbTransaction? transaction = null)
     {
-        if (connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
         {
             return;
         }
 
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
         try
         {
             await ExecuteResetSessionAsync(connection, cancellationToken, transaction).ConfigureAwait(false);
@@ -363,15 +408,21 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         {
             // Suppress exception on cleanup during connection closing or failed rollback
         }
+        finally
+        {
+            _isApplyingRls.Value = previous;
+        }
     }
 
     private void RestoreOrResetSessionAfterTransaction(DbConnection connection)
     {
-        if (connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
         {
             return;
         }
 
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
         try
         {
             var tenantId = _tenantContextAccessor.TenantId;
@@ -390,17 +441,23 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         {
             // Suppress exception on cleanup during failed transaction or broken connection
         }
+        finally
+        {
+            _isApplyingRls.Value = previous;
+        }
     }
 
     private async Task RestoreOrResetSessionAfterTransactionAsync(
         DbConnection connection,
         CancellationToken cancellationToken)
     {
-        if (connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
         {
             return;
         }
 
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
         try
         {
             var tenantId = _tenantContextAccessor.TenantId;
@@ -418,6 +475,10 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         catch
         {
             // Suppress exception on cleanup during failed transaction or broken connection
+        }
+        finally
+        {
+            _isApplyingRls.Value = previous;
         }
     }
 

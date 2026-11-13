@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 
 namespace PeopleFlow.Web.Middleware;
@@ -6,10 +7,13 @@ namespace PeopleFlow.Web.Middleware;
 /// Correlation ID middleware that reads or creates a distributed correlation identifier.
 /// Attaches to HttpContext.TraceIdentifier and outgoing X-Correlation-Id response header.
 /// </summary>
-public class CorrelationIdMiddleware
+public partial class CorrelationIdMiddleware
 {
     public const string CorrelationIdHeaderName = "X-Correlation-Id";
     private readonly RequestDelegate _next;
+
+    [GeneratedRegex("^[A-Za-z0-9._-]{1,64}$", RegexOptions.CultureInvariant)]
+    private static partial Regex ValidCorrelationIdRegex();
 
     public CorrelationIdMiddleware(RequestDelegate next)
     {
@@ -20,10 +24,13 @@ public class CorrelationIdMiddleware
     {
         string correlationId;
 
-        if (context.Request.Headers.TryGetValue(CorrelationIdHeaderName, out var values) &&
-            !string.IsNullOrWhiteSpace(values.FirstOrDefault()))
+        var incoming = context.Request.Headers.TryGetValue(CorrelationIdHeaderName, out var values)
+            ? values.FirstOrDefault()
+            : null;
+
+        if (!string.IsNullOrEmpty(incoming) && ValidCorrelationIdRegex().IsMatch(incoming))
         {
-            correlationId = values.First()!;
+            correlationId = incoming;
         }
         else
         {

@@ -11,6 +11,7 @@ using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Entities;
 using PeopleFlow.Storage.Abstractions;
 using PeopleFlow.Storage.Common;
+using PeopleFlow.Storage.Sanitization;
 
 namespace PeopleFlow.Storage.Services;
 
@@ -85,12 +86,18 @@ public class S3PrivateFileService : IPrivateFileService
         ArgumentException.ThrowIfNullOrWhiteSpace(contentType);
         ArgumentNullException.ThrowIfNull(content);
 
-        using var tenantScope = (_tenantContextAccessor != null)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"))
-            : null;
+        if (_options.MaxFileSizeBytes <= 0)
+        {
+            throw new InvalidOperationException(
+                "Storage:MaxFileSizeBytes must be configured to a positive limit before accepting file uploads.");
+        }
+
+        var sanitizedFileName = FileUploadIngressValidator.SanitizeFileName(fileName);
+
+        using var tenantScope = _dbContext.BeginOperationTenantScope(tenantId);
 
         // Early check for seekable streams to avoid buffering oversized payloads in memory
-        if (_options.MaxFileSizeBytes > 0 && content.CanSeek && content.Length > _options.MaxFileSizeBytes)
+        if (content.CanSeek && content.Length > _options.MaxFileSizeBytes)
         {
             throw new InvalidOperationException(
                 $"File size exceeds maximum allowed limit of {_options.MaxFileSizeBytes} bytes.");
@@ -105,7 +112,7 @@ public class S3PrivateFileService : IPrivateFileService
         while ((bytesRead = await content.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
         {
             totalRead += bytesRead;
-            if (_options.MaxFileSizeBytes > 0 && totalRead > _options.MaxFileSizeBytes)
+            if (totalRead > _options.MaxFileSizeBytes)
             {
                 throw new InvalidOperationException(
                     $"File size exceeds maximum allowed limit of {_options.MaxFileSizeBytes} bytes.");
@@ -113,11 +120,12 @@ public class S3PrivateFileService : IPrivateFileService
             await ms.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
         }
 
-        ms.Position = 0;
-        var checksum = Convert.ToHexString(SHA256.HashData(ms.GetBuffer().AsSpan(0, (int)ms.Length))).ToLowerInvariant();
+        var payloadSpan = ms.GetBuffer().AsSpan(0, (int)ms.Length);
+        FileUploadIngressValidator.ValidateAndInspectHeader(sanitizedFileName, contentType, payloadSpan);
+
+        var checksum = Convert.ToHexString(SHA256.HashData(payloadSpan)).ToLowerInvariant();
 
         var fileId = Guid.CreateVersion7();
-        var sanitizedFileName = Path.GetFileName(fileName);
         var storageKey = $"quarantine/{tenantId}/{fileId}/{sanitizedFileName}";
         var bucket = _options.QuarantineBucket;
 
@@ -143,7 +151,7 @@ public class S3PrivateFileService : IPrivateFileService
         };
 
         _dbContext.StoredFiles.Add(storedFile);
-        await SaveChangesInTenantScopeAsync(tenantId, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return storedFile;
     }
@@ -152,20 +160,8 @@ public class S3PrivateFileService : IPrivateFileService
         Guid storedFileId,
         CancellationToken cancellationToken = default)
     {
-        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
-        var storedFile = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(f => f.Id == storedFileId, cancellationToken)
-            ?? throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-
-        if (activeTenantId.HasValue && storedFile.TenantId != activeTenantId.Value)
-        {
-            throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-        }
-
-        using var tenantScope = (_tenantContextAccessor != null && !activeTenantId.HasValue)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(storedFile.TenantId, "Active"))
-            : null;
+        var (storedFile, tenantScope) = await GetRequiredTenantScopedFileAsync(storedFileId, cancellationToken);
+        using var _ = tenantScope;
 
         // Idempotent retry: if already Available, return immediately without re-copying or deleting
         if (storedFile.ScanStatus == FileStatus.Available)
@@ -181,7 +177,7 @@ public class S3PrivateFileService : IPrivateFileService
 
         var currentBucket = storedFile.BucketName ?? _options.QuarantineBucket;
         var destinationBucket = _options.PrivateBucket;
-        var destinationKey = $"private/tenants/{storedFile.TenantId}/{storedFile.OwnerModule}/{storedFile.Id}/{Path.GetFileName(storedFile.OriginalFileName)}";
+        var destinationKey = $"private/tenants/{storedFile.TenantId}/{storedFile.OwnerModule}/{storedFile.Id}/{FileUploadIngressValidator.SanitizeFileName(storedFile.OriginalFileName)}";
 
         // Copy from quarantine to private
         await _blobStorage.CopyObjectAsync(currentBucket, storedFile.StorageKey, destinationBucket, destinationKey, cancellationToken);
@@ -195,7 +191,7 @@ public class S3PrivateFileService : IPrivateFileService
         storedFile.ScanStatus = FileStatus.Available;
         storedFile.ScannedAtUtc = _clock.UtcNow;
 
-        await SaveChangesInTenantScopeAsync(storedFile.TenantId, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return storedFile;
     }
@@ -205,20 +201,8 @@ public class S3PrivateFileService : IPrivateFileService
         string? reason = null,
         CancellationToken cancellationToken = default)
     {
-        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
-        var storedFile = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(f => f.Id == storedFileId, cancellationToken)
-            ?? throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-
-        if (activeTenantId.HasValue && storedFile.TenantId != activeTenantId.Value)
-        {
-            throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-        }
-
-        using var tenantScope = (_tenantContextAccessor != null && !activeTenantId.HasValue)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(storedFile.TenantId, "Active"))
-            : null;
+        var (storedFile, tenantScope) = await GetRequiredTenantScopedFileAsync(storedFileId, cancellationToken);
+        using var _ = tenantScope;
 
         // Idempotent retry: if already rejected, return immediately
         if (storedFile.ScanStatus == FileStatus.RejectedInfected)
@@ -261,7 +245,7 @@ public class S3PrivateFileService : IPrivateFileService
             Reason: reason ?? "Malware detected during quarantine scan");
         await auditWriter.WriteAsync(auditEntry, autoSave: false, cancellationToken);
 
-        await SaveChangesInTenantScopeAsync(storedFile.TenantId, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return storedFile;
     }
@@ -271,20 +255,8 @@ public class S3PrivateFileService : IPrivateFileService
         string? reason = null,
         CancellationToken cancellationToken = default)
     {
-        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
-        var storedFile = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(f => f.Id == storedFileId, cancellationToken)
-            ?? throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-
-        if (activeTenantId.HasValue && storedFile.TenantId != activeTenantId.Value)
-        {
-            throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-        }
-
-        using var tenantScope = (_tenantContextAccessor != null && !activeTenantId.HasValue)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(storedFile.TenantId, "Active"))
-            : null;
+        var (storedFile, tenantScope) = await GetRequiredTenantScopedFileAsync(storedFileId, cancellationToken);
+        using var _ = tenantScope;
 
         if (storedFile.ScanStatus == FileStatus.RejectedInvalidType)
         {
@@ -327,7 +299,7 @@ public class S3PrivateFileService : IPrivateFileService
             Reason: reason ?? "Invalid file type detected during quarantine scan");
         await auditWriter.WriteAsync(auditEntry, autoSave: false, cancellationToken);
 
-        await SaveChangesInTenantScopeAsync(storedFile.TenantId, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return storedFile;
     }
@@ -359,22 +331,8 @@ public class S3PrivateFileService : IPrivateFileService
                 $"Presigned download URL expiry must be between 1 and {_options.MaxPresignedExpirySeconds} seconds. Requested: {expiry.TotalSeconds}s.");
         }
 
-        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
-        if (_tenantContextAccessor != null && (!activeTenantId.HasValue || activeTenantId.Value == Guid.Empty))
-        {
-            throw new UnauthorizedAccessException("Active tenant context is required for file access.");
-        }
-
-        var storedFile = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(f => f.Id == storedFileId, cancellationToken)
-            ?? throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-
-        // Enforce strict tenant boundary
-        if (activeTenantId.HasValue && storedFile.TenantId != activeTenantId.Value)
-        {
-            throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-        }
+        var (storedFile, tenantScope) = await GetRequiredTenantScopedFileAsync(storedFileId, cancellationToken);
+        using var _ = tenantScope;
 
         if (storedFile.ScanStatus != FileStatus.Available)
         {
@@ -384,7 +342,7 @@ public class S3PrivateFileService : IPrivateFileService
 
         var bucket = storedFile.BucketName ?? _options.PrivateBucket;
         var key = storedFile.StorageKey;
-        var sanitizedFileName = Path.GetFileName(storedFile.OriginalFileName);
+        var sanitizedFileName = FileUploadIngressValidator.SanitizeFileName(storedFile.OriginalFileName);
 
         if (!await _blobStorage.ExistsAsync(bucket, key, cancellationToken))
         {
@@ -398,22 +356,8 @@ public class S3PrivateFileService : IPrivateFileService
         Guid storedFileId,
         CancellationToken cancellationToken = default)
     {
-        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
-        if (_tenantContextAccessor != null && (!activeTenantId.HasValue || activeTenantId.Value == Guid.Empty))
-        {
-            throw new UnauthorizedAccessException("Active tenant context is required for file access.");
-        }
-
-        var storedFile = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(f => f.Id == storedFileId, cancellationToken)
-            ?? throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-
-        // Enforce strict tenant boundary
-        if (activeTenantId.HasValue && storedFile.TenantId != activeTenantId.Value)
-        {
-            throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-        }
+        var (storedFile, tenantScope) = await GetRequiredTenantScopedFileAsync(storedFileId, cancellationToken);
+        using var _ = tenantScope;
 
         if (storedFile.ScanStatus != FileStatus.Available)
         {
@@ -441,17 +385,8 @@ public class S3PrivateFileService : IPrivateFileService
             throw new ArgumentException("OwnerEntityId must not be empty.", nameof(ownerEntityId));
         }
 
-        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
-
-        var storedFile = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(f => f.Id == storedFileId, cancellationToken)
-            ?? throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-
-        if (activeTenantId.HasValue && activeTenantId.Value != Guid.Empty && storedFile.TenantId != activeTenantId.Value)
-        {
-            throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
-        }
+        var (storedFile, tenantScope) = await GetRequiredTenantScopedFileAsync(storedFileId, cancellationToken);
+        using var _ = tenantScope;
 
         if (storedFile.ScanStatus != FileStatus.Available)
         {
@@ -463,7 +398,7 @@ public class S3PrivateFileService : IPrivateFileService
         storedFile.OwnerEntityType = ownerEntityType;
         storedFile.OwnerEntityId = ownerEntityId;
 
-        await SaveChangesInTenantScopeAsync(storedFile.TenantId, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return storedFile;
     }
@@ -482,12 +417,9 @@ public class S3PrivateFileService : IPrivateFileService
             throw new UnauthorizedAccessException("Cannot inspect storage usage of another tenant.");
         }
 
-        using var tenantScope = (_tenantContextAccessor != null)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"))
-            : null;
+        using var tenantScope = _dbContext.BeginOperationTenantScope(tenantId);
 
         var totalBytes = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
             .Where(f => f.TenantId == tenantId &&
                         f.ScanStatus != FileStatus.RejectedInfected &&
                         f.ScanStatus != FileStatus.RejectedMalware &&
@@ -498,21 +430,34 @@ public class S3PrivateFileService : IPrivateFileService
         return totalBytes ?? 0L;
     }
 
-    private async Task SaveChangesInTenantScopeAsync(Guid tenantId, CancellationToken cancellationToken)
+    private async Task<(StoredFile File, IDisposable TenantScope)> GetRequiredTenantScopedFileAsync(
+        Guid storedFileId,
+        CancellationToken cancellationToken)
     {
-        IDisposable? tenantScope = null;
-        if (!_dbContext.CurrentTenantId.HasValue && _tenantContextAccessor != null)
+        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
+        if (!activeTenantId.HasValue || activeTenantId.Value == Guid.Empty)
         {
-            tenantScope = _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"));
+            throw new UnauthorizedAccessException("Active tenant context is required for file access.");
         }
 
+        var tenantScope = _dbContext.BeginOperationTenantScope(activeTenantId.Value);
         try
         {
-            await _dbContext.SaveChangesAsync(cancellationToken);
+            var storedFile = await _dbContext.StoredFiles
+                .FirstOrDefaultAsync(f => f.Id == storedFileId, cancellationToken)
+                ?? throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
+
+            if (storedFile.TenantId != activeTenantId.Value)
+            {
+                throw new KeyNotFoundException($"StoredFile '{storedFileId}' was not found.");
+            }
+
+            return (storedFile, tenantScope);
         }
-        finally
+        catch
         {
-            tenantScope?.Dispose();
+            tenantScope.Dispose();
+            throw;
         }
     }
 }

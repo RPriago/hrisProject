@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using PeopleFlow.Kernel.Domain;
 using PeopleFlow.Kernel.Time;
 using PeopleFlow.MultiTenancy.Abstractions;
+using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.MultiTenancy.Interceptors;
 using PeopleFlow.Persistence.Conventions;
 using PeopleFlow.Persistence.Entities;
@@ -21,13 +22,56 @@ public class PeopleFlowDbContext : DbContext
     private readonly IClock? _clock;
     private readonly ICurrentActorContext? _currentActorContext;
     private readonly NpgsqlTenantRlsInterceptor? _rlsInterceptor;
+    private readonly AsyncLocal<Guid?> _scopedTenantOverride = new();
 
-    public Guid? CurrentTenantId => _tenantContextAccessor?.TenantId;
+    public Guid? CurrentTenantId => _tenantContextAccessor?.TenantId ?? _scopedTenantOverride.Value;
+
+    /// <summary>
+    /// Opens a fail-closed operation-scoped tenant context for explicit-tenant operations
+    /// (such as background job execution, quarantine scanning, or idempotency writes).
+    /// Throws <see cref="UnauthorizedAccessException"/> if <paramref name="tenantId"/> is empty, and
+    /// <see cref="InvalidOperationException"/> if a different tenant context is already active.
+    /// </summary>
+    public IDisposable BeginOperationTenantScope(Guid tenantId)
+    {
+        if (tenantId == Guid.Empty)
+        {
+            throw new UnauthorizedAccessException("Active tenant context with non-empty TenantId is required.");
+        }
+
+        if (CurrentTenantId.HasValue && CurrentTenantId.Value != tenantId)
+        {
+            throw new InvalidOperationException(
+                "Cannot switch tenant scope to a different tenant while an active tenant context is present.");
+        }
+
+        if (_tenantContextAccessor != null)
+        {
+            return _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"));
+        }
+
+        var previous = _scopedTenantOverride.Value;
+        _scopedTenantOverride.Value = tenantId;
+        return new DelegatedScope(() => _scopedTenantOverride.Value = previous);
+    }
+
+    private sealed class DelegatedScope(Action onDispose) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                onDispose();
+            }
+        }
+    }
 
     public DbSet<IdempotencyRecord> IdempotencyRecords => Set<IdempotencyRecord>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<BackgroundJobRun> BackgroundJobRuns => Set<BackgroundJobRun>();
     public DbSet<StoredFile> StoredFiles => Set<StoredFile>();
+    public DbSet<DataProtectionKeyRecord> DataProtectionKeys => Set<DataProtectionKeyRecord>();
 
     public PeopleFlowDbContext(
         DbContextOptions<PeopleFlowDbContext> options,

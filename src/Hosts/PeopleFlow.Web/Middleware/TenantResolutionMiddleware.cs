@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.MultiTenancy.Context;
@@ -16,11 +17,16 @@ public class TenantResolutionMiddleware
     public const string TenantIdHeaderName = "X-Tenant-Id";
     private readonly RequestDelegate _next;
     private readonly IHostEnvironment? _environment;
+    private readonly IConfiguration? _configuration;
 
-    public TenantResolutionMiddleware(RequestDelegate next, IHostEnvironment? environment = null)
+    public TenantResolutionMiddleware(
+        RequestDelegate next,
+        IHostEnvironment? environment = null,
+        IConfiguration? configuration = null)
     {
         _next = next;
         _environment = environment;
+        _configuration = configuration;
     }
 
     public async Task InvokeAsync(
@@ -28,8 +34,10 @@ public class TenantResolutionMiddleware
         ITenantContextAccessor tenantAccessor,
         ICurrentActorContext? actorContext = null)
     {
+        var isAuthenticatedPrincipal = context.User.Identity?.IsAuthenticated == true;
+
         // 1. Resolve tenant from authenticated user claims (all environments including Production)
-        if (context.User.Identity?.IsAuthenticated == true)
+        if (isAuthenticatedPrincipal)
         {
             var rawClaimTenantId = context.User.FindFirst("tenant_id")?.Value
                 ?? context.User.FindFirst("active_tenant_id")?.Value;
@@ -42,12 +50,15 @@ public class TenantResolutionMiddleware
             }
         }
 
-        // 2. Gated header fallback for Development and Testing environments
+        // 2. Strictly gated header fallback for unauthenticated Development/Testing test harnesses only
         var isDevOrTest = _environment != null &&
             (_environment.IsDevelopment() || _environment.IsEnvironment("Testing"));
+        var allowHeaderOverride = isDevOrTest &&
+            _configuration?.GetValue<bool>("Security:AllowHeaderContextOverride") == true;
 
-        if (!tenantAccessor.CurrentTenant.HasTenant &&
-            isDevOrTest &&
+        if (!isAuthenticatedPrincipal &&
+            !tenantAccessor.CurrentTenant.HasTenant &&
+            allowHeaderOverride &&
             context.Request.Headers.TryGetValue(TenantIdHeaderName, out var values) &&
             Guid.TryParse(values.FirstOrDefault(), out var tenantId) &&
             tenantId != Guid.Empty)
@@ -58,7 +69,9 @@ public class TenantResolutionMiddleware
         string? rawUserId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? context.User.FindFirst("sub")?.Value;
 
-        if (string.IsNullOrWhiteSpace(rawUserId) && isDevOrTest &&
+        if (!isAuthenticatedPrincipal &&
+            string.IsNullOrWhiteSpace(rawUserId) &&
+            allowHeaderOverride &&
             context.Request.Headers.TryGetValue("X-User-Id", out var userHeaderValues))
         {
             rawUserId = userHeaderValues.FirstOrDefault();
@@ -84,7 +97,7 @@ public class TenantResolutionMiddleware
 
         if (actorContext != null)
         {
-            var isAuth = userId.HasValue && userId.Value != Guid.Empty;
+            var isAuth = isAuthenticatedPrincipal && userId.HasValue && userId.Value != Guid.Empty;
             actorContext.SetActorContext(new ActorContext(
                 userId,
                 sessionId,

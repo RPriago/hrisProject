@@ -14,26 +14,6 @@ public sealed class PiiDestructuringPolicy : IDestructuringPolicy
 {
     private static readonly ConcurrentDictionary<Type, PropertyRule[]> TypeCache = new();
 
-    private static readonly string[] SensitiveNamePatterns =
-    [
-        "Password",
-        "Token",
-        "Secret",
-        "Nik",
-        "BankAccount",
-        "CreditCard",
-        "ApiKey",
-        "PrivateKey",
-        "NationalId",
-        "Npwp",
-        "Salary",
-        "Wage",
-        "Otp",
-        "Rekening",
-        "Payslip",
-        "SlipGaji"
-    ];
-
     private sealed record PropertyRule(
         PropertyInfo Property,
         bool IsSensitive,
@@ -48,6 +28,23 @@ public sealed class PiiDestructuringPolicy : IDestructuringPolicy
         if (value is null)
         {
             return false;
+        }
+
+        if (SensitiveDataRedactor.TryEnumerateDictionary(value, out var dictEntries))
+        {
+            var elements = new List<KeyValuePair<ScalarValue, LogEventPropertyValue>>(dictEntries.Count);
+            foreach (var entry in dictEntries)
+            {
+                var logValue = SensitiveDataRedactor.IsSensitiveName(entry.Key)
+                    ? new ScalarValue(SensitiveDataRedactor.Mask)
+                    : propertyValueFactory.CreatePropertyValue(entry.Value, destructureObjects: true);
+                elements.Add(new KeyValuePair<ScalarValue, LogEventPropertyValue>(
+                    new ScalarValue(entry.Key),
+                    logValue));
+            }
+
+            result = new DictionaryValue(elements);
+            return true;
         }
 
         var type = value.GetType();
@@ -80,10 +77,7 @@ public sealed class PiiDestructuringPolicy : IDestructuringPolicy
                     return new PropertyRule(p, IsSensitive: true, Mask: attr.Mask);
                 }
 
-                var matchesPattern = SensitiveNamePatterns.Any(pattern =>
-                    p.Name.Contains(pattern, StringComparison.OrdinalIgnoreCase));
-
-                return new PropertyRule(p, IsSensitive: matchesPattern, Mask: "****");
+                return new PropertyRule(p, IsSensitive: SensitiveDataRedactor.IsSensitiveName(p.Name), Mask: SensitiveDataRedactor.Mask);
             }).ToArray();
         });
 
@@ -97,7 +91,7 @@ public sealed class PiiDestructuringPolicy : IDestructuringPolicy
             }
             catch (Exception ex)
             {
-                propValue = $"<error reading property: {ex.Message}>";
+                propValue = $"<error reading property: {SensitiveDataRedactor.SanitizeExceptionSummary(ex, 200)}>";
             }
 
             LogEventPropertyValue propertyVal;

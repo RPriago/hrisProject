@@ -125,6 +125,43 @@ public partial class PeopleFlowDbContextModelSnapshot : ModelSnapshot
             b.ToTable("infra_background_job_runs", (string)null);
         });
 
+        modelBuilder.Entity("PeopleFlow.Persistence.Entities.DataProtectionKeyRecord", b =>
+        {
+            b.Property<Guid>("Id")
+                .ValueGeneratedOnAdd()
+                .HasColumnType("uuid")
+                .HasColumnName("id");
+
+            b.Property<DateTimeOffset>("CreatedAtUtc")
+                .HasColumnType("timestamp with time zone")
+                .HasColumnName("created_at_utc");
+
+            b.Property<string>("FriendlyName")
+                .HasMaxLength(256)
+                .HasColumnType("character varying(256)")
+                .HasColumnName("friendly_name");
+
+            b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                .HasColumnType("timestamp with time zone")
+                .HasColumnName("updated_at_utc");
+
+            b.Property<string>("Xml")
+                .IsRequired()
+                .HasColumnType("text")
+                .HasColumnName("xml");
+
+            b.Property<uint>("xmin")
+                .IsConcurrencyToken()
+                .ValueGeneratedOnAddOrUpdate()
+                .HasColumnType("xid")
+                .HasColumnName("xmin")
+                .HasDefaultValue(0u);
+
+            b.HasKey("Id");
+
+            b.ToTable("infra_data_protection_keys", (string)null);
+        });
+
         modelBuilder.Entity("PeopleFlow.Persistence.Entities.IdempotencyRecord", b =>
         {
             b.Property<Guid>("Id")

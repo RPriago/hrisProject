@@ -23,6 +23,7 @@ using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Idempotency;
 using PeopleFlow.Persistence.Outbox;
 using PeopleFlow.Security.Authorization;
+using PeopleFlow.Security.Configuration;
 using PeopleFlow.Security.Context;
 using PeopleFlow.Security.Redaction;
 using PeopleFlow.Storage.Abstractions;
@@ -35,7 +36,13 @@ using Serilog.Core;
 
 namespace PeopleFlow.Worker;
 
-public class ActiveTenantSubscriptionValidator : ITenantSubscriptionValidator
+public sealed class FailClosedTenantSubscriptionValidator : ITenantSubscriptionValidator
+{
+    public bool IsTenantExecutionAllowed(Guid tenantId) => false;
+    public string? GetSubscriptionStatus(Guid tenantId) => "Suspended";
+}
+
+public sealed class DevStubTenantSubscriptionValidator : ITenantSubscriptionValidator
 {
     public bool IsTenantExecutionAllowed(Guid tenantId) => tenantId != Guid.Empty;
     public string? GetSubscriptionStatus(Guid tenantId) => "Active";
@@ -100,14 +107,36 @@ public class Program
         Host.CreateDefaultBuilder(args ?? Array.Empty<string>())
             .ConfigureServices((hostContext, services) =>
             {
-                var connectionString = hostContext.Configuration.GetConnectionString("DefaultConnection")
-                    ?? "Host=localhost;Database=peopleflow_dev;Username=peopleflow_app;Password=peopleflow_app_secret";
+                StartupSecurityValidator.ValidateHostConfiguration(
+                    hostContext.Configuration,
+                    hostContext.HostingEnvironment,
+                    requireWebSecurityOptions: false);
+
+                var connectionString = hostContext.Configuration.GetConnectionString("DefaultConnection");
+                if (string.IsNullOrWhiteSpace(connectionString))
+                {
+                    if (hostContext.HostingEnvironment.IsDevelopment() || hostContext.HostingEnvironment.IsEnvironment("Testing"))
+                    {
+                        connectionString = "Host=localhost;Database=peopleflow_dev;Username=peopleflow_app;Password=peopleflow_app_secret";
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("ConnectionStrings:DefaultConnection is required in non-development environments.");
+                    }
+                }
 
                 services.AddSingleton<IClock, SystemClock>();
                 services.AddSingleton<ITenantContextAccessor, AsyncLocalTenantContextAccessor>();
                 services.AddSingleton<ICurrentActorContext, AsyncLocalCurrentActorContext>();
                 services.AddSingleton<IAuthorizationGuard, FourTierAuthorizationPipeline>();
-                services.AddSingleton<ITenantSubscriptionValidator, ActiveTenantSubscriptionValidator>();
+                if (hostContext.HostingEnvironment.IsDevelopment() || hostContext.HostingEnvironment.IsEnvironment("Testing"))
+                {
+                    services.AddSingleton<ITenantSubscriptionValidator, DevStubTenantSubscriptionValidator>();
+                }
+                else
+                {
+                    services.AddSingleton<ITenantSubscriptionValidator, FailClosedTenantSubscriptionValidator>();
+                }
                 services.AddSingleton<TenantJobActivationFilter>();
                 services.TryAddSingleton<IDestructuringPolicy, PiiDestructuringPolicy>();
 
@@ -151,7 +180,13 @@ public class Program
                 }
 
                 services.AddScoped<IPrivateFileService, S3PrivateFileService>();
-                services.AddSingleton<IFileQuarantineScanner, MockOrClamAvScanner>();
+                services.AddSingleton<IFileQuarantineScanner>(sp =>
+                {
+                    var opts = sp.GetRequiredService<StorageOptions>();
+                    return opts.UseClamAvDaemon
+                        ? new ClamAvDaemonScanner(opts)
+                        : new MockOrClamAvScanner();
+                });
                 services.AddSingleton<ICsvFormulaSanitizer, CsvFormulaSanitizer>();
                 services.AddSingleton<IPythonCsvValidationRunner, PythonCsvValidationRunner>();
                 services.AddTransient<QuarantineScanJob>();

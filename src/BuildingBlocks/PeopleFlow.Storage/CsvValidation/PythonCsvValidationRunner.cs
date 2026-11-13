@@ -27,9 +27,32 @@ public class PythonCsvValidationRunner : IPythonCsvValidationRunner
 
     public async Task<CsvValidationResult> ValidateAsync(Stream csvStream, string manifestJson, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(csvStream);
+        ArgumentException.ThrowIfNullOrWhiteSpace(manifestJson);
+
+        if (_options.MaxInputCsvBytes <= 0)
+        {
+            throw new InvalidOperationException("MaxInputCsvBytes must be greater than zero.");
+        }
+
+        if (csvStream.CanSeek && csvStream.Length > _options.MaxInputCsvBytes)
+        {
+            throw new InvalidOperationException(
+                $"CSV input size exceeds maximum allowed limit of {_options.MaxInputCsvBytes} bytes.");
+        }
+
         var scriptPath = ResolveValidatorScriptPath();
         var tempDir = Path.Combine(Path.GetTempPath(), $"csv-val-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(tempDir);
+        if (!OperatingSystem.IsWindows())
+        {
+            Directory.CreateDirectory(
+                tempDir,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        else
+        {
+            Directory.CreateDirectory(tempDir);
+        }
 
         try
         {
@@ -42,7 +65,20 @@ public class PythonCsvValidationRunner : IPythonCsvValidationRunner
 
             await using (var fileStream = File.Create(inputPath))
             {
-                await csvStream.CopyToAsync(fileStream, cancellationToken);
+                var buffer = new byte[81920];
+                long totalWritten = 0;
+                int bytesRead;
+                while ((bytesRead = await csvStream.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    totalWritten += bytesRead;
+                    if (totalWritten > _options.MaxInputCsvBytes)
+                    {
+                        throw new InvalidOperationException(
+                            $"CSV input size exceeds maximum allowed limit of {_options.MaxInputCsvBytes} bytes.");
+                    }
+
+                    await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+                }
             }
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -57,6 +93,8 @@ public class PythonCsvValidationRunner : IPythonCsvValidationRunner
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+
+            ConfigureSanitizedEnvironment(startInfo, tempDir);
 
             startInfo.ArgumentList.Add(scriptPath);
             startInfo.ArgumentList.Add("--manifest");
@@ -179,5 +217,36 @@ public class PythonCsvValidationRunner : IPythonCsvValidationRunner
         }
 
         throw new FileNotFoundException("Python CSV validator script 'validator.py' could not be found.");
+    }
+
+    private static void ConfigureSanitizedEnvironment(ProcessStartInfo startInfo, string tempDir)
+    {
+        var preserved = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string[] allowedKeys =
+        [
+            "PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "LANG", "LC_ALL"
+        ];
+
+        foreach (var key in allowedKeys)
+        {
+            var val = startInfo.Environment.TryGetValue(key, out var v) ? v : Environment.GetEnvironmentVariable(key);
+            if (!string.IsNullOrEmpty(val))
+            {
+                preserved[key] = val;
+            }
+        }
+
+        startInfo.Environment.Clear();
+        foreach (var kv in preserved)
+        {
+            startInfo.Environment[kv.Key] = kv.Value;
+        }
+
+        startInfo.Environment["TMPDIR"] = tempDir;
+        startInfo.Environment["TMP"] = tempDir;
+        startInfo.Environment["TEMP"] = tempDir;
+        startInfo.Environment["PYTHONNOUSERSITE"] = "1";
+        startInfo.Environment["PYTHONDONTWRITEBYTECODE"] = "1";
+        startInfo.Environment["PYTHONUTF8"] = "1";
     }
 }

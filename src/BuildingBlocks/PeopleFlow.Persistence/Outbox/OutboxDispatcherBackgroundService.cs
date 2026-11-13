@@ -7,6 +7,7 @@ using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Entities;
+using PeopleFlow.Security.Redaction;
 
 namespace PeopleFlow.Persistence.Outbox;
 
@@ -123,15 +124,15 @@ public class OutboxDispatcherBackgroundService : BackgroundService
             }
             catch (Exception ex)
             {
+                var errorMsg = SensitiveDataRedactor.SanitizeExceptionSummary(ex, 1000);
                 _logger.LogError(
-                    ex,
-                    "Failed to process outbox message {MessageId} of type {MessageType} (Attempt {AttemptCount})",
+                    "Failed to process outbox message {MessageId} of type {MessageType} (Attempt {AttemptCount}): {ErrorSummary}",
                     message.Id,
                     message.MessageType,
-                    message.AttemptCount);
+                    message.AttemptCount,
+                    errorMsg);
 
-                var errorMsg = ex.ToString();
-                message.LastErrorSummary = errorMsg.Length > 1000 ? errorMsg[..1000] : errorMsg;
+                message.LastErrorSummary = errorMsg;
 
                 if (message.AttemptCount >= _options.MaxRetries)
                 {

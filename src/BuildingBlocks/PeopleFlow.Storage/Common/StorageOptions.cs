@@ -14,4 +14,8 @@ public sealed class StorageOptions
     public string? SecretKey { get; set; }
     public string Region { get; set; } = "ap-southeast-1";
     public bool ForcePathStyle { get; set; } = true;
+    public bool UseClamAvDaemon { get; set; } = false;
+    public string ClamAvHost { get; set; } = "localhost";
+    public int ClamAvPort { get; set; } = 3310;
+    public int ClamAvTimeoutSeconds { get; set; } = 10;
 }

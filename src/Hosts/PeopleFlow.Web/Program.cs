@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text.Json;
 using Amazon;
 using Amazon.Runtime;
 using Amazon.S3;
@@ -5,7 +7,11 @@ using Hangfire;
 using Hangfire.Common;
 using Hangfire.PostgreSql;
 using Hangfire.States;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,9 +26,11 @@ using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.MultiTenancy.Interceptors;
 using PeopleFlow.Persistence.Audit;
 using PeopleFlow.Persistence.Context;
+using PeopleFlow.Persistence.DataProtection;
 using PeopleFlow.Persistence.Idempotency;
 using PeopleFlow.Persistence.Outbox;
 using PeopleFlow.Security.Authorization;
+using PeopleFlow.Security.Configuration;
 using PeopleFlow.Security.Context;
 using PeopleFlow.Security.Csrf;
 using PeopleFlow.Security.Redaction;
@@ -59,10 +67,43 @@ public partial class Program
         };
         var builder = WebApplication.CreateBuilder(options);
 
+        StartupSecurityValidator.ValidateHostConfiguration(
+            builder.Configuration,
+            builder.Environment,
+            requireWebSecurityOptions: true);
+
         builder.Services.AddControllers()
             .AddApplicationPart(typeof(Program).Assembly);
         builder.Services.AddEndpointsApiExplorer();
-        builder.Services.AddDataProtection();
+        builder.Services.AddDataProtection()
+            .SetApplicationName("PeopleFlow")
+            .PersistKeysToPeopleFlowDbContext();
+
+        builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+            .AddCookie(cookieOptions =>
+            {
+                cookieOptions.Cookie.Name = PeopleFlow.Security.Authentication.SessionCookieConfig.CookieName;
+                cookieOptions.Cookie.HttpOnly = true;
+                cookieOptions.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                cookieOptions.Cookie.SameSite = SameSiteMode.Lax;
+                cookieOptions.Cookie.Path = "/";
+                cookieOptions.ExpireTimeSpan = TimeSpan.FromHours(8);
+                cookieOptions.SlidingExpiration = false;
+                cookieOptions.Events = new CookieAuthenticationEvents
+                {
+                    OnRedirectToLogin = ctx => WriteAuthProblemAsync(
+                        ctx.HttpContext,
+                        StatusCodes.Status401Unauthorized,
+                        "AUTH_REQUIRED",
+                        "Authentication is required to access this resource."),
+                    OnRedirectToAccessDenied = ctx => WriteAuthProblemAsync(
+                        ctx.HttpContext,
+                        StatusCodes.Status403Forbidden,
+                        "FORBIDDEN",
+                        "You do not have permission to access this resource.")
+                };
+            });
+        builder.Services.AddAuthorization();
 
         builder.Services.AddSingleton<IClock, SystemClock>();
         builder.Services.AddSingleton<ITenantContextAccessor, AsyncLocalTenantContextAccessor>();
@@ -72,6 +113,7 @@ public partial class Program
 
         var csrfOptions = new CsrfTokenOptions();
         builder.Configuration.GetSection("Security:Csrf").Bind(csrfOptions);
+        csrfOptions.RequireConfiguredKey = !builder.Environment.IsDevelopment() && !builder.Environment.IsEnvironment("Testing");
         builder.Services.TryAddSingleton(csrfOptions);
         builder.Services.TryAddSingleton<ICsrfTokenService>(sp => new CsrfTokenService(sp.GetRequiredService<CsrfTokenOptions>()));
 
@@ -79,6 +121,8 @@ public partial class Program
         var csrfValidationOptions = new CsrfValidationOptions
         {
             AllowedOrigins = new HashSet<string>(allowedOrigins, StringComparer.OrdinalIgnoreCase),
+            AllowSelfOriginFallback = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing"),
+            RequireTokenWhenSessionCookieAbsent = true,
             ExemptPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "/api/v1/auth/csrf",
@@ -87,6 +131,29 @@ public partial class Program
             }
         };
         builder.Services.AddSingleton(csrfValidationOptions);
+
+        builder.Services.Configure<ForwardedHeadersOptions>(forwardedOptions =>
+        {
+            forwardedOptions.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            forwardedOptions.ForwardLimit = 1;
+            forwardedOptions.KnownNetworks.Clear();
+            forwardedOptions.KnownProxies.Clear();
+
+            var knownProxies = builder.Configuration.GetSection("Security:ForwardedHeaders:KnownProxies").Get<string[]>() ?? Array.Empty<string>();
+            foreach (var rawProxy in knownProxies)
+            {
+                if (string.IsNullOrWhiteSpace(rawProxy)) continue;
+
+                if (rawProxy.Contains('/') && System.Net.IPNetwork.TryParse(rawProxy, out var network))
+                {
+                    forwardedOptions.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(network.BaseAddress, network.PrefixLength));
+                }
+                else if (IPAddress.TryParse(rawProxy, out var proxyIp))
+                {
+                    forwardedOptions.KnownProxies.Add(proxyIp);
+                }
+            }
+        });
 
         var storageOptions = new StorageOptions();
         builder.Configuration.GetSection("Storage").Bind(storageOptions);
@@ -128,7 +195,13 @@ public partial class Program
         }
 
         builder.Services.AddScoped<IPrivateFileService, S3PrivateFileService>();
-        builder.Services.AddSingleton<IFileQuarantineScanner, MockOrClamAvScanner>();
+        builder.Services.AddSingleton<IFileQuarantineScanner>(sp =>
+        {
+            var opts = sp.GetRequiredService<StorageOptions>();
+            return opts.UseClamAvDaemon
+                ? new ClamAvDaemonScanner(opts)
+                : new MockOrClamAvScanner();
+        });
         builder.Services.AddSingleton<ICsvFormulaSanitizer, CsvFormulaSanitizer>();
         builder.Services.AddSingleton<IPythonCsvValidationRunner, PythonCsvValidationRunner>();
         builder.Services.AddTransient<QuarantineScanJob>();
@@ -144,8 +217,18 @@ public partial class Program
         }
         else
         {
-            var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-                ?? "Host=localhost;Database=peopleflow_dev;Username=peopleflow_app;Password=peopleflow_app_secret";
+            var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing"))
+                {
+                    connectionString = "Host=localhost;Database=peopleflow_dev;Username=peopleflow_app;Password=peopleflow_app_secret";
+                }
+                else
+                {
+                    throw new InvalidOperationException("ConnectionStrings:DefaultConnection is required in non-development environments.");
+                }
+            }
 
             builder.Services.AddDbContext<PeopleFlowDbContext>((sp, options) =>
             {
@@ -179,13 +262,19 @@ public partial class Program
 
     public static void ConfigurePipeline(WebApplication app)
     {
-        // Enforce pipeline order: CorrelationId -> ProblemDetails -> Csrf -> TenantResolution -> Routing / Controllers
+        // Enforce pipeline order: ForwardedHeaders -> CorrelationId -> SecurityHeaders -> ProblemDetails -> Routing -> Csrf -> TenantResolution -> Controllers
+        app.UseForwardedHeaders();
         app.UseMiddleware<CorrelationIdMiddleware>();
+        app.UseMiddleware<SecurityHeadersMiddleware>();
         app.UseMiddleware<ProblemDetailsMiddleware>();
-        app.UseMiddleware<CsrfValidationMiddleware>();
-        app.UseMiddleware<TenantResolutionMiddleware>();
 
         app.UseRouting();
+
+        app.UseAuthentication();
+        app.UseAuthorization();
+
+        app.UseMiddleware<CsrfValidationMiddleware>();
+        app.UseMiddleware<TenantResolutionMiddleware>();
 
         // Guard test-only simulation routes so they are never exposed in Production
         if (app.Environment.IsDevelopment() || app.Environment.IsEnvironment("Testing"))
@@ -209,6 +298,25 @@ public partial class Program
         }
 
         app.MapControllers();
+    }
+
+    private static async Task WriteAuthProblemAsync(HttpContext context, int statusCode, string code, string detail)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/problem+json";
+
+        var payload = new
+        {
+            type = $"https://httpstatuses.com/{statusCode}",
+            title = statusCode == StatusCodes.Status401Unauthorized ? "Unauthorized" : "Forbidden",
+            status = statusCode,
+            code,
+            detail,
+            instance = context.Request.Path.Value,
+            correlationId = context.TraceIdentifier
+        };
+
+        await context.Response.WriteAsync(JsonSerializer.Serialize(payload));
     }
 
     private sealed class DefaultFallbackBackgroundJobClient : IBackgroundJobClient

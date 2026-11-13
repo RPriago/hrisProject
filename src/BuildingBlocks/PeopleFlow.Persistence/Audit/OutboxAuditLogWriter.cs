@@ -15,13 +15,6 @@ public sealed class OutboxAuditLogWriter : IAuditLogWriter
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    private static readonly string[] SensitiveKeySubstrings =
-    [
-        "Password", "Token", "Secret", "Nik", "BankAccount", "CreditCard",
-        "ApiKey", "PrivateKey", "NationalId", "Npwp", "Salary", "Wage",
-        "Otp", "Rekening", "Payslip", "SlipGaji"
-    ];
-
     private readonly PeopleFlowDbContext _dbContext;
 
     public OutboxAuditLogWriter(PeopleFlowDbContext dbContext)
@@ -118,14 +111,16 @@ public sealed class OutboxAuditLogWriter : IAuditLogWriter
             return value;
         }
 
-        if (value is IReadOnlyDictionary<string, object?> readOnlyDict)
+        if (SensitiveDataRedactor.TryEnumerateDictionary(value, out var entries))
         {
-            return SanitizeValues(readOnlyDict, depth + 1, visited);
-        }
-
-        if (value is IDictionary<string, object?> dict)
-        {
-            return SanitizeValues(new Dictionary<string, object?>(dict, StringComparer.OrdinalIgnoreCase), depth + 1, visited);
+            var sanitized = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in entries)
+            {
+                sanitized[kv.Key] = IsSensitiveKey(kv.Key)
+                    ? SensitiveDataRedactor.Mask
+                    : SanitizeValue(kv.Value, depth + 1, visited);
+            }
+            return sanitized;
         }
 
         var typeSensitiveAttr = type.GetCustomAttribute<SensitiveDataAttribute>(inherit: true);
@@ -176,8 +171,5 @@ public sealed class OutboxAuditLogWriter : IAuditLogWriter
         return objDict;
     }
 
-    private static bool IsSensitiveKey(string key)
-    {
-        return SensitiveKeySubstrings.Any(s => key.Contains(s, StringComparison.OrdinalIgnoreCase));
-    }
+    private static bool IsSensitiveKey(string key) => SensitiveDataRedactor.IsSensitiveName(key);
 }

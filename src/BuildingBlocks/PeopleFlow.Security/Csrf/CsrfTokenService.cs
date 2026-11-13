@@ -7,6 +7,7 @@ namespace PeopleFlow.Security.Csrf;
 public sealed class CsrfTokenOptions
 {
     public string? SecretKey { get; set; }
+    public bool RequireConfiguredKey { get; set; } = false;
     public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromHours(24);
 
     public int? TokenLifetimeMinutes
@@ -33,7 +34,16 @@ public sealed class CsrfTokenService : ICsrfTokenService
         _tokenLifetime = options?.TokenLifetime ?? TimeSpan.FromHours(24);
         if (!string.IsNullOrWhiteSpace(options?.SecretKey))
         {
-            _keyBytes = Encoding.UTF8.GetBytes(options.SecretKey);
+            var bytes = Encoding.UTF8.GetBytes(options.SecretKey);
+            if (options.RequireConfiguredKey && bytes.Length < 32)
+            {
+                throw new InvalidOperationException("Security:Csrf:SecretKey must be at least 32 bytes.");
+            }
+            _keyBytes = bytes;
+        }
+        else if (options?.RequireConfiguredKey == true)
+        {
+            throw new InvalidOperationException("Security:Csrf:SecretKey must be explicitly configured.");
         }
         else
         {

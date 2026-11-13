@@ -1,33 +1,78 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Hosting;
+using PeopleFlow.Kernel.Common;
 using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Idempotency;
+using PeopleFlow.Security.Authorization;
+using PeopleFlow.Security.Context;
 using PeopleFlow.Web.Filters;
 
 namespace PeopleFlow.Web.Controllers;
 
 [ApiController]
+[Authorize]
 [Route("api/v1/jobs")]
 public class JobsController : ControllerBase
 {
     private readonly PeopleFlowDbContext _dbContext;
     private readonly ITenantContextAccessor _tenantContextAccessor;
+    private readonly ICurrentActorContext _actorContext;
+    private readonly IAuthorizationGuard _authorizationGuard;
 
     public JobsController(
         PeopleFlowDbContext dbContext,
-        ITenantContextAccessor tenantContextAccessor)
+        ITenantContextAccessor tenantContextAccessor,
+        ICurrentActorContext actorContext,
+        IAuthorizationGuard authorizationGuard)
     {
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
         _tenantContextAccessor = tenantContextAccessor ?? throw new ArgumentNullException(nameof(tenantContextAccessor));
+        _actorContext = actorContext ?? throw new ArgumentNullException(nameof(actorContext));
+        _authorizationGuard = authorizationGuard ?? throw new ArgumentNullException(nameof(authorizationGuard));
     }
 
     [HttpGet("{jobId:guid}")]
     public async Task<IActionResult> GetJobProgress(Guid jobId, CancellationToken cancellationToken)
     {
         var tenantId = _tenantContextAccessor.TenantId ?? _dbContext.CurrentTenantId;
+        var authResult = await _authorizationGuard.AuthorizeAsync(
+            new AuthorizationContext
+            {
+                User = new AuthIdentity(_actorContext.UserId, _actorContext.IsAuthenticated, IsActive: true),
+                Tenant = tenantId.HasValue && tenantId.Value != Guid.Empty
+                    ? new TenantIdentity(tenantId.Value, IsMember: true, SubscriptionStatus: _tenantContextAccessor.SubscriptionStatus ?? "Active")
+                    : TenantIdentity.Empty,
+                Requirement = new ResourceRequirement(IsReadOperation: true)
+            },
+            cancellationToken);
+
+        if (authResult.IsFailure)
+        {
+            var statusCode = authResult.Error.Type == ErrorType.Unauthorized
+                ? StatusCodes.Status401Unauthorized
+                : StatusCodes.Status403Forbidden;
+
+            var problem = new ProblemDetails
+            {
+                Type = $"https://httpstatuses.com/{statusCode}",
+                Title = statusCode == StatusCodes.Status401Unauthorized ? "Unauthorized" : "Forbidden",
+                Status = statusCode,
+                Detail = authResult.Error.Message,
+                Instance = HttpContext.Request.Path
+            };
+            problem.Extensions["code"] = authResult.Error.Code;
+            problem.Extensions["correlationId"] = HttpContext.TraceIdentifier;
+
+            return new ObjectResult(problem)
+            {
+                StatusCode = statusCode,
+                ContentTypes = { "application/problem+json" }
+            };
+        }
+
         if (!tenantId.HasValue || tenantId.Value == Guid.Empty)
         {
             var problem = new ProblemDetails
@@ -44,6 +89,7 @@ public class JobsController : ControllerBase
         }
 
         var run = await _dbContext.BackgroundJobRuns
+            .AsNoTracking()
             .FirstOrDefaultAsync(r => r.Id == jobId && r.TenantId == tenantId.Value, cancellationToken);
 
         if (run == null)
@@ -81,6 +127,7 @@ public class JobsController : ControllerBase
     }
 
     [HttpPost("test-idempotent")]
+    [AllowAnonymous]
     [EnvironmentRequired("Development", "Testing")]
     [ApiExplorerSettings(IgnoreApi = true)]
     [IdempotencyFilter]

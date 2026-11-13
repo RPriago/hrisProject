@@ -3,7 +3,10 @@ using Hangfire;
 using Hangfire.Server;
 using PeopleFlow.Jobs.Envelopes;
 using PeopleFlow.Jobs.Tracker;
+using PeopleFlow.MultiTenancy.Abstractions;
+using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.Persistence.Entities;
+using PeopleFlow.Security.Redaction;
 
 namespace PeopleFlow.Jobs.Services;
 
@@ -15,78 +18,35 @@ public sealed class HangfireBackgroundJobService : IBackgroundJobService
 {
     private readonly IBackgroundJobClient _backgroundJobClient;
     private readonly IJobProgressTracker _jobProgressTracker;
+    private readonly ITenantContextAccessor? _tenantContextAccessor;
 
     public HangfireBackgroundJobService(
         IBackgroundJobClient backgroundJobClient,
-        IJobProgressTracker jobProgressTracker)
+        IJobProgressTracker jobProgressTracker,
+        ITenantContextAccessor? tenantContextAccessor = null)
     {
         _backgroundJobClient = backgroundJobClient ?? throw new ArgumentNullException(nameof(backgroundJobClient));
         _jobProgressTracker = jobProgressTracker ?? throw new ArgumentNullException(nameof(jobProgressTracker));
+        _tenantContextAccessor = tenantContextAccessor;
     }
 
-    public async Task<BackgroundJobRun> EnqueueAsync<TJob>(
+    public Task<BackgroundJobRun> EnqueueAsync<TJob>(
         JobEnvelope envelope,
         string jobCategory,
         Expression<Func<TJob, Task>> methodCall,
         int? totalItems = null,
         CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(envelope);
-        ArgumentException.ThrowIfNullOrWhiteSpace(jobCategory);
-        ArgumentNullException.ThrowIfNull(methodCall);
+        => DispatchJobAsync(envelope, jobCategory, methodCall, () => _backgroundJobClient.Enqueue(methodCall), totalItems, cancellationToken);
 
-        ValidateMethodCallExpression(methodCall, envelope);
-
-        var run = await _jobProgressTracker.EnqueueAsync(envelope, jobCategory, totalItems, hangfireJobId: null, cancellationToken);
-        try
-        {
-            var jobId = _backgroundJobClient.Enqueue(methodCall);
-            if (!string.IsNullOrEmpty(jobId))
-            {
-                await _jobProgressTracker.AttachHangfireJobIdAsync(run.Id, jobId, cancellationToken);
-                run.HangfireJobId = jobId;
-            }
-            return run;
-        }
-        catch (Exception ex)
-        {
-            await _jobProgressTracker.FailAsync(run.Id, ex.Message, cancellationToken: cancellationToken);
-            throw;
-        }
-    }
-
-    public async Task<BackgroundJobRun> EnqueueAsync<TJob>(
+    public Task<BackgroundJobRun> EnqueueAsync<TJob>(
         JobEnvelope envelope,
         string jobCategory,
         Expression<Action<TJob>> methodCall,
         int? totalItems = null,
         CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(envelope);
-        ArgumentException.ThrowIfNullOrWhiteSpace(jobCategory);
-        ArgumentNullException.ThrowIfNull(methodCall);
+        => DispatchJobAsync(envelope, jobCategory, methodCall, () => _backgroundJobClient.Enqueue(methodCall), totalItems, cancellationToken);
 
-        ValidateMethodCallExpression(methodCall, envelope);
-
-        var run = await _jobProgressTracker.EnqueueAsync(envelope, jobCategory, totalItems, hangfireJobId: null, cancellationToken);
-        try
-        {
-            var jobId = _backgroundJobClient.Enqueue(methodCall);
-            if (!string.IsNullOrEmpty(jobId))
-            {
-                await _jobProgressTracker.AttachHangfireJobIdAsync(run.Id, jobId, cancellationToken);
-                run.HangfireJobId = jobId;
-            }
-            return run;
-        }
-        catch (Exception ex)
-        {
-            await _jobProgressTracker.FailAsync(run.Id, ex.Message, cancellationToken: cancellationToken);
-            throw;
-        }
-    }
-
-    public async Task<BackgroundJobRun> ScheduleAsync<TJob>(
+    public Task<BackgroundJobRun> ScheduleAsync<TJob>(
         JobEnvelope envelope,
         string jobCategory,
         Expression<Func<TJob, Task>> methodCall,
@@ -94,35 +54,15 @@ public sealed class HangfireBackgroundJobService : IBackgroundJobService
         int? totalItems = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(envelope);
-        ArgumentException.ThrowIfNullOrWhiteSpace(jobCategory);
-        ArgumentNullException.ThrowIfNull(methodCall);
         if (delay < TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(delay), "Delay must not be negative.");
         }
 
-        ValidateMethodCallExpression(methodCall, envelope);
-
-        var run = await _jobProgressTracker.EnqueueAsync(envelope, jobCategory, totalItems, hangfireJobId: null, cancellationToken);
-        try
-        {
-            var jobId = _backgroundJobClient.Schedule(methodCall, delay);
-            if (!string.IsNullOrEmpty(jobId))
-            {
-                await _jobProgressTracker.AttachHangfireJobIdAsync(run.Id, jobId, cancellationToken);
-                run.HangfireJobId = jobId;
-            }
-            return run;
-        }
-        catch (Exception ex)
-        {
-            await _jobProgressTracker.FailAsync(run.Id, ex.Message, cancellationToken: cancellationToken);
-            throw;
-        }
+        return DispatchJobAsync(envelope, jobCategory, methodCall, () => _backgroundJobClient.Schedule(methodCall, delay), totalItems, cancellationToken);
     }
 
-    public async Task<BackgroundJobRun> ScheduleAsync<TJob>(
+    public Task<BackgroundJobRun> ScheduleAsync<TJob>(
         JobEnvelope envelope,
         string jobCategory,
         Expression<Action<TJob>> methodCall,
@@ -130,20 +70,34 @@ public sealed class HangfireBackgroundJobService : IBackgroundJobService
         int? totalItems = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(envelope);
-        ArgumentException.ThrowIfNullOrWhiteSpace(jobCategory);
-        ArgumentNullException.ThrowIfNull(methodCall);
         if (delay < TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(delay), "Delay must not be negative.");
         }
 
+        return DispatchJobAsync(envelope, jobCategory, methodCall, () => _backgroundJobClient.Schedule(methodCall, delay), totalItems, cancellationToken);
+    }
+
+    private async Task<BackgroundJobRun> DispatchJobAsync(
+        JobEnvelope envelope,
+        string jobCategory,
+        LambdaExpression methodCall,
+        Func<string?> scheduleAction,
+        int? totalItems,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        ArgumentException.ThrowIfNullOrWhiteSpace(jobCategory);
+        ArgumentNullException.ThrowIfNull(methodCall);
+
         ValidateMethodCallExpression(methodCall, envelope);
+
+        using var tenantScope = BeginTenantScopeIfUnset(envelope.TenantId);
 
         var run = await _jobProgressTracker.EnqueueAsync(envelope, jobCategory, totalItems, hangfireJobId: null, cancellationToken);
         try
         {
-            var jobId = _backgroundJobClient.Schedule(methodCall, delay);
+            var jobId = scheduleAction();
             if (!string.IsNullOrEmpty(jobId))
             {
                 await _jobProgressTracker.AttachHangfireJobIdAsync(run.Id, jobId, cancellationToken);
@@ -153,9 +107,24 @@ public sealed class HangfireBackgroundJobService : IBackgroundJobService
         }
         catch (Exception ex)
         {
-            await _jobProgressTracker.FailAsync(run.Id, ex.Message, cancellationToken: cancellationToken);
+            await _jobProgressTracker.FailAsync(
+                run.Id,
+                SensitiveDataRedactor.SanitizeExceptionSummary(ex, 1000),
+                cancellationToken: cancellationToken);
             throw;
         }
+    }
+
+    private IDisposable? BeginTenantScopeIfUnset(Guid tenantId)
+    {
+        if (_tenantContextAccessor != null)
+        {
+            return _tenantContextAccessor.TenantId.HasValue
+                ? null
+                : _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"));
+        }
+
+        return (_jobProgressTracker as JobProgressTracker)?.BeginOperationTenantScope(tenantId);
     }
 
     private static void ValidateMethodCallExpression(LambdaExpression expression, JobEnvelope expectedEnvelope)

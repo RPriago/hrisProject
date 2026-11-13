@@ -56,15 +56,14 @@ public class AwsS3BlobStorage : IS3BlobStorage
     public async Task<Stream?> GetObjectStreamAsync(string bucketName, string key, CancellationToken cancellationToken = default)
     {
         var response = await _s3Client.GetObjectAsync(bucketName, key, cancellationToken);
-        return response.ResponseStream;
+        return new OwnedS3Stream(response);
     }
 
     public string GeneratePresignedUrl(string bucketName, string key, TimeSpan expiry, string downloadFileName)
     {
-        var sanitizedFileName = downloadFileName
-            .Replace("\r", "")
-            .Replace("\n", "")
-            .Replace("\"", "\\\"");
+        var leafName = FileUploadIngressValidatorSafeLeaf(downloadFileName);
+        var asciiSafe = BuildAsciiFallbackFileName(leafName);
+        var encodedUtf8 = Uri.EscapeDataString(leafName);
 
         var request = new GetPreSignedUrlRequest
         {
@@ -73,11 +72,78 @@ public class AwsS3BlobStorage : IS3BlobStorage
             Expires = DateTime.UtcNow.Add(expiry),
             ResponseHeaderOverrides = new ResponseHeaderOverrides
             {
-                ContentDisposition = $"attachment; filename=\"{sanitizedFileName}\""
+                ContentDisposition = $"attachment; filename=\"{asciiSafe}\"; filename*=UTF-8''{encodedUtf8}"
             }
         };
 
         return _s3Client.GetPreSignedURL(request);
+    }
+
+    private static string FileUploadIngressValidatorSafeLeaf(string fileName)
+    {
+        try
+        {
+            return PeopleFlow.Storage.Sanitization.FileUploadIngressValidator.SanitizeFileName(fileName);
+        }
+        catch
+        {
+            return "download";
+        }
+    }
+
+    private static string BuildAsciiFallbackFileName(string fileName)
+    {
+        var sb = new System.Text.StringBuilder(fileName.Length);
+        foreach (var ch in fileName)
+        {
+            if (ch is >= ' ' and <= '~' && ch is not ('"' or '\\' or ';'))
+            {
+                sb.Append(ch);
+            }
+            else
+            {
+                sb.Append('_');
+            }
+        }
+        return sb.Length > 0 ? sb.ToString() : "download";
+    }
+
+    private sealed class OwnedS3Stream(GetObjectResponse response) : Stream
+    {
+        private readonly Stream _inner = response.ResponseStream;
+        private int _disposed;
+
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => _inner.CanSeek;
+        public override bool CanWrite => _inner.CanWrite;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+        public override void Flush() => _inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => _inner.ReadAsync(buffer, cancellationToken);
+        public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+        public override void SetLength(long value) => _inner.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0 && disposing)
+            {
+                _inner.Dispose();
+                response.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                await _inner.DisposeAsync();
+                response.Dispose();
+            }
+            await base.DisposeAsync();
+        }
     }
 
     public bool Exists(string bucketName, string key)

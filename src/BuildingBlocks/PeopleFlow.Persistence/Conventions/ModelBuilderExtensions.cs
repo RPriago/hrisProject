@@ -176,6 +176,16 @@ public static class ModelBuilderExtensions
             b.UseXminAsConcurrencyToken();
         });
 
+        // 5. DataProtectionKeyRecord (global host key ring, no TenantId)
+        modelBuilder.Entity<DataProtectionKeyRecord>(b =>
+        {
+            b.ToTable("infra_data_protection_keys");
+            b.HasKey(e => e.Id);
+            b.Property(e => e.FriendlyName).HasMaxLength(256);
+            b.Property(e => e.Xml).HasColumnType("text").IsRequired();
+            b.UseXminAsConcurrencyToken();
+        });
+
         return modelBuilder;
     }
 

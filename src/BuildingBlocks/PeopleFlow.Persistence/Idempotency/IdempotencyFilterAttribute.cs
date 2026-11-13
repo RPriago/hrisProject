@@ -51,7 +51,19 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
             ?? throw new InvalidOperationException(
                 "IIdempotencyService is not registered in the request service provider. Fail-closed idempotency enforcement cannot proceed.");
 
-        var requestBody = await ReadRequestBodyAsync(context.HttpContext.Request);
+        var bodyRead = await ReadRequestBodyAsync(context.HttpContext.Request, context.HttpContext.RequestAborted);
+        if (bodyRead.TooLarge)
+        {
+            context.Result = CreateProblemResult(
+                StatusCodes.Status413PayloadTooLarge,
+                "Request Payload Too Large",
+                $"Request body exceeds the maximum idempotency buffer limit of {MaxRequestBodyBytes} bytes.",
+                "PAYLOAD_TOO_LARGE",
+                context.HttpContext);
+            return;
+        }
+
+        var requestBody = bodyRead.Body;
 
         var tenantAccessor = context.HttpContext.RequestServices.GetService<PeopleFlow.MultiTenancy.Abstractions.ITenantContextAccessor>();
         var tenantId = tenantAccessor?.TenantId;
@@ -150,21 +162,50 @@ public class IdempotencyFilterAttribute : Attribute, IAsyncActionFilter
         }
     }
 
-    private static async Task<string> ReadRequestBodyAsync(HttpRequest request)
+    private const int MaxRequestBodyBytes = 1_048_576; // 1 MB
+
+    private static async Task<(bool TooLarge, string Body)> ReadRequestBodyAsync(
+        HttpRequest request,
+        CancellationToken cancellationToken)
     {
         if (request.Body == null || !request.Body.CanRead)
         {
-            return string.Empty;
+            return (false, string.Empty);
         }
 
-        request.EnableBuffering();
-        request.Body.Position = 0;
+        if (request.ContentLength.HasValue && request.ContentLength.Value > MaxRequestBodyBytes)
+        {
+            return (true, string.Empty);
+        }
 
-        using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
-        var body = await reader.ReadToEndAsync();
-        request.Body.Position = 0;
+        request.EnableBuffering(bufferThreshold: 32 * 1024, bufferLimit: MaxRequestBodyBytes);
+        if (request.Body.CanSeek)
+        {
+            request.Body.Position = 0;
+        }
 
-        return body;
+        using var ms = new MemoryStream();
+        var buffer = new byte[16 * 1024];
+        var totalRead = 0;
+        int bytesRead;
+
+        while ((bytesRead = await request.Body.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)) > 0)
+        {
+            totalRead += bytesRead;
+            if (totalRead > MaxRequestBodyBytes)
+            {
+                return (true, string.Empty);
+            }
+
+            await ms.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+        }
+
+        if (request.Body.CanSeek)
+        {
+            request.Body.Position = 0;
+        }
+
+        return (false, Encoding.UTF8.GetString(ms.ToArray()));
     }
 
     private static Guid? ExtractActorUserId(ClaimsPrincipal? user)

@@ -129,9 +129,21 @@ public sealed class FourTierAuthorizationPipeline : IAuthorizationGuard
             }
         }
 
-        if (requirement.MaxEmployeeQuota.HasValue && requirement.CurrentEmployeeCount.HasValue)
+        if (requirement.MaxEmployeeQuota.HasValue || requirement.CurrentEmployeeCount.HasValue)
         {
-            if (requirement.CurrentEmployeeCount.Value >= requirement.MaxEmployeeQuota.Value)
+            if (requirement.MaxEmployeeQuota < 0 || requirement.CurrentEmployeeCount < 0)
+            {
+                return Result.Failure(Error.Forbidden("PLAN_QUOTA_INVALID", "Tenant employee quota or count cannot be negative."));
+            }
+
+            if (requirement.MaxEmployeeQuota.HasValue && !requirement.CurrentEmployeeCount.HasValue)
+            {
+                return Result.Failure(Error.Forbidden("PLAN_QUOTA_INVALID", "Current employee count is required when evaluating plan quota."));
+            }
+
+            if (requirement.MaxEmployeeQuota.HasValue &&
+                requirement.CurrentEmployeeCount.HasValue &&
+                requirement.CurrentEmployeeCount.Value >= requirement.MaxEmployeeQuota.Value)
             {
                 return Result.Failure(Error.Forbidden("PLAN_QUOTA_EXCEEDED", "Tenant employee quota has been reached."));
             }
@@ -162,7 +174,9 @@ public sealed class FourTierAuthorizationPipeline : IAuthorizationGuard
         {
             if (subject.GrantedScope == DataScope.Self)
             {
-                if (subject.TargetOwnerId.HasValue && user.UserId.HasValue && subject.TargetOwnerId.Value != user.UserId.Value)
+                if (!user.UserId.HasValue || user.UserId.Value == Guid.Empty ||
+                    !subject.TargetOwnerId.HasValue || subject.TargetOwnerId.Value == Guid.Empty ||
+                    subject.TargetOwnerId.Value != user.UserId.Value)
                 {
                     return Result.Failure(Error.Forbidden("SCOPE_ACCESS_DENIED", "Access denied: Self scope only permits accessing own records."));
                 }
@@ -173,10 +187,13 @@ public sealed class FourTierAuthorizationPipeline : IAuthorizationGuard
                 return Result.Failure(Error.Forbidden("SCOPE_ACCESS_DENIED", "Access denied: Target entity is outside authorized data scope."));
             }
 
-            if (subject.ActorScopeUnitId.HasValue && subject.TargetScopeUnitId.HasValue &&
-                subject.ActorScopeUnitId.Value != subject.TargetScopeUnitId.Value)
+            if (subject.ActorScopeUnitId.HasValue || subject.TargetScopeUnitId.HasValue)
             {
-                return Result.Failure(Error.Forbidden("SCOPE_ACCESS_DENIED", "Access denied: Target entity is outside actor organizational unit scope."));
+                if (!subject.ActorScopeUnitId.HasValue || !subject.TargetScopeUnitId.HasValue ||
+                    subject.ActorScopeUnitId.Value != subject.TargetScopeUnitId.Value)
+                {
+                    return Result.Failure(Error.Forbidden("SCOPE_ACCESS_DENIED", "Access denied: Target entity is outside actor organizational unit scope."));
+                }
             }
         }
 

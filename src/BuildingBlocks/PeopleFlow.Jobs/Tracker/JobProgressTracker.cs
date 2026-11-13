@@ -55,9 +55,7 @@ public sealed class JobProgressTracker : IJobProgressTracker
             throw new InvalidOperationException("Cannot enqueue job for a different tenant than the active ambient tenant.");
         }
 
-        using var tenantScope = (_tenantContextAccessor != null)
-            ? _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"))
-            : null;
+        using var tenantScope = _dbContext.BeginOperationTenantScope(tenantId);
 
         var run = new BackgroundJobRun
         {
@@ -75,7 +73,7 @@ public sealed class JobProgressTracker : IJobProgressTracker
         };
 
         _dbContext.BackgroundJobRuns.Add(run);
-        await SaveChangesInTenantScopeAsync(tenantId, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
         return run;
     }
 
@@ -263,29 +261,34 @@ public sealed class JobProgressTracker : IJobProgressTracker
         return run;
     }
 
+    internal IDisposable BeginOperationTenantScope(Guid tenantId) => _dbContext.BeginOperationTenantScope(tenantId);
+
     public async Task<BackgroundJobRun?> GetByIdAsync(
         Guid jobRunId,
         CancellationToken cancellationToken = default)
     {
-        var query = _dbContext.BackgroundJobRuns.AsQueryable();
-        if (!_dbContext.CurrentTenantId.HasValue)
+        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
+        if (!activeTenantId.HasValue || activeTenantId.Value == Guid.Empty)
         {
-            query = query.IgnoreQueryFilters();
+            return null;
         }
 
-        return await query.FirstOrDefaultAsync(r => r.Id == jobRunId, cancellationToken);
+        using var tenantScope = _dbContext.BeginOperationTenantScope(activeTenantId.Value);
+        return await _dbContext.BackgroundJobRuns.FirstOrDefaultAsync(r => r.Id == jobRunId, cancellationToken);
     }
 
     private async Task<BackgroundJobRun> GetRequiredRunAsync(Guid jobRunId, CancellationToken cancellationToken)
     {
-        var run = await GetByIdAsync(jobRunId, cancellationToken);
-
-        if (run == null)
+        var activeTenantId = _tenantContextAccessor?.TenantId ?? _dbContext.CurrentTenantId;
+        if (!activeTenantId.HasValue || activeTenantId.Value == Guid.Empty)
         {
-            throw new KeyNotFoundException($"Background job run '{jobRunId}' was not found.");
+            throw new UnauthorizedAccessException("Active tenant context is required for background job run operations.");
         }
 
-        if (_dbContext.CurrentTenantId.HasValue && run.TenantId != _dbContext.CurrentTenantId.Value)
+        using var tenantScope = _dbContext.BeginOperationTenantScope(activeTenantId.Value);
+        var run = await _dbContext.BackgroundJobRuns.FirstOrDefaultAsync(r => r.Id == jobRunId, cancellationToken);
+
+        if (run == null || run.TenantId != activeTenantId.Value)
         {
             throw new KeyNotFoundException($"Background job run '{jobRunId}' was not found.");
         }
@@ -295,19 +298,7 @@ public sealed class JobProgressTracker : IJobProgressTracker
 
     private async Task SaveChangesInTenantScopeAsync(Guid tenantId, CancellationToken cancellationToken)
     {
-        IDisposable? tenantScope = null;
-        if (!_dbContext.CurrentTenantId.HasValue && _tenantContextAccessor != null)
-        {
-            tenantScope = _tenantContextAccessor.BeginScope(new TenantContext(tenantId, "Active"));
-        }
-
-        try
-        {
-            await _dbContext.SaveChangesAsync(cancellationToken);
-        }
-        finally
-        {
-            tenantScope?.Dispose();
-        }
+        using var tenantScope = _dbContext.BeginOperationTenantScope(tenantId);
+        await _dbContext.SaveChangesAsync(cancellationToken);
     }
 }

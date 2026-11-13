@@ -42,10 +42,9 @@ public class QuarantineScanJob
     {
         ArgumentNullException.ThrowIfNull(envelope);
 
-        using var tenantScope = _tenantContextAccessor?.BeginScope(new TenantContext(envelope.TenantId, "Active"));
+        using var tenantScope = _dbContext.BeginOperationTenantScope(envelope.TenantId);
 
         var storedFile = await _dbContext.StoredFiles
-            .IgnoreQueryFilters()
             .FirstOrDefaultAsync(f => f.Id == envelope.TargetEntityId, cancellationToken);
 
         if (storedFile == null || storedFile.TenantId != envelope.TenantId)
