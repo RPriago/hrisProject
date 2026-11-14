@@ -107,19 +107,31 @@ public class JobsController : ControllerBase
             return NotFound(problem);
         }
 
-        var isOwner = run.InitiatedByUserId.HasValue &&
-                      _actorContext.UserId.HasValue &&
-                      run.InitiatedByUserId.Value == _actorContext.UserId.Value;
-        var isAdminOrReadAll = _actorContext.Roles.Contains("TenantAdmin", StringComparer.OrdinalIgnoreCase) ||
-                               _actorContext.Roles.Contains("SuperAdmin", StringComparer.OrdinalIgnoreCase) ||
-                               _actorContext.Roles.Contains("SystemAdmin", StringComparer.OrdinalIgnoreCase) ||
-                               _actorContext.Roles.Contains("HrAdmin", StringComparer.OrdinalIgnoreCase) ||
-                               _actorContext.Roles.Contains("Admin", StringComparer.OrdinalIgnoreCase) ||
-                               _actorContext.Roles.Contains("jobs:read_all", StringComparer.OrdinalIgnoreCase) ||
-                               User.HasClaim("permission", "jobs:read_all") ||
-                               User.HasClaim("permissions", "jobs:read_all");
+        var isApiClient = User.HasClaim("auth_mode", "api_client");
+        bool isAuthorizedJobReader;
+        if (isApiClient)
+        {
+            var hasOrgScopeConstraint = User.HasClaim(c =>
+                c.Type == "scoped_legal_entity_id" || c.Type == "scoped_location_id");
+            isAuthorizedJobReader = !hasOrgScopeConstraint && User.HasClaim("api_scope", "jobs:read_all");
+        }
+        else
+        {
+            var isOwner = run.InitiatedByUserId.HasValue &&
+                          _actorContext.UserId.HasValue &&
+                          run.InitiatedByUserId.Value == _actorContext.UserId.Value;
+            var isAdminOrReadAll = _actorContext.Roles.Contains("TenantAdmin", StringComparer.OrdinalIgnoreCase) ||
+                                   _actorContext.Roles.Contains("SuperAdmin", StringComparer.OrdinalIgnoreCase) ||
+                                   _actorContext.Roles.Contains("SystemAdmin", StringComparer.OrdinalIgnoreCase) ||
+                                   _actorContext.Roles.Contains("HrAdmin", StringComparer.OrdinalIgnoreCase) ||
+                                   _actorContext.Roles.Contains("Admin", StringComparer.OrdinalIgnoreCase) ||
+                                   _actorContext.Roles.Contains("jobs:read_all", StringComparer.OrdinalIgnoreCase) ||
+                                   User.HasClaim("permission", "jobs:read_all") ||
+                                   User.HasClaim("permissions", "jobs:read_all");
+            isAuthorizedJobReader = isOwner || isAdminOrReadAll;
+        }
 
-        if (!isOwner && !isAdminOrReadAll)
+        if (!isAuthorizedJobReader)
         {
             var forbidden = new ProblemDetails
             {

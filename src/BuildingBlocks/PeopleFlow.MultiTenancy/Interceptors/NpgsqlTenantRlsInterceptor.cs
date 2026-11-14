@@ -2,6 +2,8 @@ using System.Data;
 using System.Data.Common;
 using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Logging;
+using Npgsql;
 using PeopleFlow.MultiTenancy.Abstractions;
 
 namespace PeopleFlow.MultiTenancy.Interceptors;
@@ -15,6 +17,7 @@ namespace PeopleFlow.MultiTenancy.Interceptors;
 public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTransactionInterceptor, IDbCommandInterceptor
 {
     private readonly ITenantContextAccessor _tenantContextAccessor;
+    private readonly ILogger<NpgsqlTenantRlsInterceptor>? _logger;
     private readonly ConditionalWeakTable<DbConnection, ConnectionRlsState> _connectionStates = new();
     private readonly AsyncLocal<bool> _isApplyingRls = new();
 
@@ -32,9 +35,12 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
     // Backward-compatibility alias
     public const string SetTenantConfigSql = SetTenantTransactionConfigSql;
 
-    public NpgsqlTenantRlsInterceptor(ITenantContextAccessor tenantContextAccessor)
+    public NpgsqlTenantRlsInterceptor(
+        ITenantContextAccessor tenantContextAccessor,
+        ILogger<NpgsqlTenantRlsInterceptor>? logger = null)
     {
         _tenantContextAccessor = tenantContextAccessor ?? throw new ArgumentNullException(nameof(tenantContextAccessor));
+        _logger = logger;
     }
 
     #region DbConnectionInterceptor Overrides
@@ -72,6 +78,23 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
         await ResetTenantSessionAsync(connection, default).ConfigureAwait(false);
         _connectionStates.Remove(connection);
         return await base.ConnectionClosingAsync(connection, eventData, result).ConfigureAwait(false);
+    }
+
+    public override void ConnectionFailed(DbConnection connection, ConnectionErrorEventData eventData)
+    {
+        _connectionStates.Remove(connection);
+        ClearPoolIfNpgsql(connection);
+        base.ConnectionFailed(connection, eventData);
+    }
+
+    public override Task ConnectionFailedAsync(
+        DbConnection connection,
+        ConnectionErrorEventData eventData,
+        CancellationToken cancellationToken = default)
+    {
+        _connectionStates.Remove(connection);
+        ClearPoolIfNpgsql(connection);
+        return base.ConnectionFailedAsync(connection, eventData, cancellationToken);
     }
 
     #endregion
@@ -120,7 +143,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
     {
         if (transaction?.Connection != null)
         {
-            RestoreOrResetSessionAfterTransaction(transaction.Connection);
+            ResetConfigAfterFailedOrRolledBackTransaction(transaction.Connection);
         }
     }
 
@@ -131,7 +154,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
     {
         if (transaction?.Connection != null)
         {
-            await RestoreOrResetSessionAfterTransactionAsync(transaction.Connection, cancellationToken).ConfigureAwait(false);
+            await ResetConfigAfterFailedOrRolledBackTransactionAsync(transaction.Connection, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -139,7 +162,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
     {
         if (transaction?.Connection != null)
         {
-            RestoreOrResetSessionAfterTransaction(transaction.Connection);
+            ResetConfigAfterFailedOrRolledBackTransaction(transaction.Connection);
         }
     }
 
@@ -150,7 +173,7 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
     {
         if (transaction?.Connection != null)
         {
-            await RestoreOrResetSessionAfterTransactionAsync(transaction.Connection, cancellationToken).ConfigureAwait(false);
+            await ResetConfigAfterFailedOrRolledBackTransactionAsync(transaction.Connection, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -379,9 +402,12 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
             ExecuteResetSession(connection, transaction);
             MarkConnectionSynchronized(connection, null);
         }
-        catch
+        catch (Exception ex)
         {
-            // Suppress exception on cleanup during connection closing or failed rollback
+            _connectionStates.Remove(connection);
+            ClearPoolIfNpgsql(connection);
+            _logger?.LogError(ex, "Failed to reset PostgreSQL RLS session state while closing connection; connection pool cleared.");
+            throw new InvalidOperationException("Failed to reset PostgreSQL RLS session state while closing connection; connection pool cleared.", ex);
         }
         finally
         {
@@ -406,13 +432,77 @@ public sealed class NpgsqlTenantRlsInterceptor : DbConnectionInterceptor, IDbTra
             await ExecuteResetSessionAsync(connection, cancellationToken, transaction).ConfigureAwait(false);
             MarkConnectionSynchronized(connection, null);
         }
-        catch
+        catch (Exception ex)
         {
-            // Suppress exception on cleanup during connection closing or failed rollback
+            _connectionStates.Remove(connection);
+            ClearPoolIfNpgsql(connection);
+            _logger?.LogError(ex, "Failed to reset PostgreSQL RLS session state while closing connection; connection pool cleared.");
+            throw new InvalidOperationException("Failed to reset PostgreSQL RLS session state while closing connection; connection pool cleared.", ex);
         }
         finally
         {
             _isApplyingRls.Value = previous;
+        }
+    }
+
+    private void ResetConfigAfterFailedOrRolledBackTransaction(DbConnection connection)
+    {
+        _connectionStates.Remove(connection);
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        {
+            return;
+        }
+
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
+        try
+        {
+            // Never restore/promote tenant ID to session scope after rollback or failure; force fail-closed reset.
+            ExecuteResetConfig(connection, transaction: null);
+        }
+        catch (Exception ex)
+        {
+            ClearPoolIfNpgsql(connection);
+            _logger?.LogWarning(ex, "Failed to reset PostgreSQL RLS session config after transaction rollback/failure; connection pool cleared.");
+        }
+        finally
+        {
+            _isApplyingRls.Value = previous;
+        }
+    }
+
+    private async Task ResetConfigAfterFailedOrRolledBackTransactionAsync(
+        DbConnection connection,
+        CancellationToken cancellationToken)
+    {
+        _connectionStates.Remove(connection);
+        if (_isApplyingRls.Value || connection.State != ConnectionState.Open || !IsPostgreSqlConnection(connection))
+        {
+            return;
+        }
+
+        var previous = _isApplyingRls.Value;
+        _isApplyingRls.Value = true;
+        try
+        {
+            await ExecuteResetConfigAsync(connection, cancellationToken, transaction: null).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ClearPoolIfNpgsql(connection);
+            _logger?.LogWarning(ex, "Failed to reset PostgreSQL RLS session config after transaction rollback/failure; connection pool cleared.");
+        }
+        finally
+        {
+            _isApplyingRls.Value = previous;
+        }
+    }
+
+    private static void ClearPoolIfNpgsql(DbConnection connection)
+    {
+        if (connection is NpgsqlConnection npgsqlConn)
+        {
+            NpgsqlConnection.ClearPool(npgsqlConn);
         }
     }
 

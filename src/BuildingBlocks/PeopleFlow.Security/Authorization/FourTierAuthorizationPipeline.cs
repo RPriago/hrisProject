@@ -107,13 +107,15 @@ public sealed class FourTierAuthorizationPipeline : IAuthorizationGuard
             {
                 return Result.Failure(Error.Forbidden("TENANT_READ_ONLY_PAST_DUE", "Tenant account is past due. Mutating operations are locked in read-only mode."));
             }
-
-            return Result.Success();
         }
-
-        if (!ActiveStatuses.Contains(tenant.SubscriptionStatus))
+        else if (!ActiveStatuses.Contains(tenant.SubscriptionStatus))
         {
             return Result.Failure(Error.Forbidden("TENANT_STATUS_UNRECOGNIZED", $"Tenant subscription status '{tenant.SubscriptionStatus}' is unrecognized."));
+        }
+
+        if (tenant.IsSupportAccess && !requirement.IsReadOperation)
+        {
+            return Result.Failure(Error.Forbidden("SUPPORT_ACCESS_READ_ONLY", "Support access sessions cannot perform mutating operations."));
         }
 
         return Result.Success();
@@ -154,6 +156,11 @@ public sealed class FourTierAuthorizationPipeline : IAuthorizationGuard
 
     private static Result EvaluateTier4(AuthIdentity user, ResourceRequirement requirement, EvaluationSubject subject)
     {
+        if (subject.IsReadOnlyRole && !requirement.IsReadOperation)
+        {
+            return Result.Failure(Error.Forbidden("READ_ONLY_ROLE_MUTATION_DENIED", "Read-only role cannot perform mutating operations."));
+        }
+
         if (!string.IsNullOrWhiteSpace(requirement.RequiredPermission))
         {
             if (subject.UserPermissions == null || !subject.UserPermissions.Contains(requirement.RequiredPermission))

@@ -1,13 +1,35 @@
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using PeopleFlow.Kernel.Time;
 using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Entities;
+using PeopleFlow.Security.Redaction;
 
 namespace PeopleFlow.Persistence.Outbox;
 
+public static class PlatformOutboxMessageTypes
+{
+    public const string BreakGlassLoginAlert = "Security.BreakGlassLoginAlert";
+    public const string PasswordResetRequested = "Identity.PasswordResetRequested";
+
+    public static readonly IReadOnlySet<string> Allowed = new HashSet<string>(StringComparer.Ordinal)
+    {
+        BreakGlassLoginAlert,
+        PasswordResetRequested
+    };
+}
+
 public class OutboxPublisher : IOutboxPublisher
 {
+    private static readonly IReadOnlySet<string> PreservedOutboxProperties =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "protectedResetToken",
+            "normalizedEmail",
+            "invitedEmail"
+        };
+
     private readonly PeopleFlowDbContext _dbContext;
     private readonly ITenantContextAccessor? _tenantContextAccessor;
     private readonly IClock? _clock;
@@ -60,13 +82,19 @@ public class OutboxPublisher : IOutboxPublisher
                 $"Cannot publish outbox message for tenant '{effectiveTenantId}' while ambient tenant context is '{ambientTenantId.Value}'.");
         }
 
+        if (!effectiveTenantId.HasValue)
+        {
+            return await PublishPlatformAsync(messageType, payloadJson, correlationId, cancellationToken);
+        }
+
         var now = _clock?.UtcNow ?? DateTimeOffset.UtcNow;
+        var safePayloadJson = SensitiveDataRedactor.RedactJson(payloadJson, PreservedOutboxProperties);
 
         var outboxMessage = new OutboxMessage
         {
             TenantId = effectiveTenantId,
             MessageType = messageType,
-            PayloadJson = payloadJson ?? string.Empty,
+            PayloadJson = safePayloadJson,
             CorrelationId = correlationId ?? Guid.CreateVersion7(),
             Status = OutboxMessageStatus.Pending,
             AttemptCount = 0,
@@ -77,6 +105,49 @@ public class OutboxPublisher : IOutboxPublisher
 
         if (autoSave)
         {
+            using var scope = !ambientTenantId.HasValue && effectiveTenantId.HasValue
+                ? _dbContext.BeginOperationTenantScope(effectiveTenantId.Value)
+                : null;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        return outboxMessage;
+    }
+
+    public async Task<OutboxMessage> PublishPlatformAsync(
+        string messageType,
+        string payloadJson,
+        Guid? correlationId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(messageType) || !PlatformOutboxMessageTypes.Allowed.Contains(messageType))
+        {
+            throw new UnauthorizedAccessException($"Platform outbox message type '{messageType}' is not allowlisted.");
+        }
+
+        var now = _clock?.UtcNow ?? DateTimeOffset.UtcNow;
+        var safePayloadJson = SensitiveDataRedactor.RedactJson(payloadJson, PreservedOutboxProperties);
+        var outboxMessage = new OutboxMessage(Guid.CreateVersion7())
+        {
+            TenantId = null,
+            MessageType = messageType,
+            PayloadJson = safePayloadJson,
+            CorrelationId = correlationId ?? Guid.CreateVersion7(),
+            Status = OutboxMessageStatus.Pending,
+            AttemptCount = 0,
+            NextAttemptAtUtc = now
+        };
+
+        if (_dbContext.Database.IsNpgsql())
+        {
+            Guid? createdBy = null;
+            await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT fn_enqueue_platform_outbox_message({outboxMessage.Id}, {outboxMessage.MessageType}, CAST({outboxMessage.PayloadJson} AS jsonb), {outboxMessage.CorrelationId}, {now}, {outboxMessage.NextAttemptAtUtc}, CAST({createdBy} AS uuid));",
+                cancellationToken);
+        }
+        else
+        {
+            _dbContext.OutboxMessages.Add(outboxMessage);
             await _dbContext.SaveChangesAsync(cancellationToken);
         }
 

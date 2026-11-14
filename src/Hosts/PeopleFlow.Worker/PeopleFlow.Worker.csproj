@@ -18,6 +18,12 @@
     <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Security\PeopleFlow.Security.csproj" />
     <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Storage\PeopleFlow.Storage.csproj" />
     <ProjectReference Include="..\..\BuildingBlocks\PeopleFlow.Jobs\PeopleFlow.Jobs.csproj" />
+    <ProjectReference Include="..\..\Modules\Identity\PeopleFlow.Modules.Identity.Contracts\PeopleFlow.Modules.Identity.Contracts.csproj" />
+    <ProjectReference Include="..\..\Modules\Identity\PeopleFlow.Modules.Identity.Core\PeopleFlow.Modules.Identity.Core.csproj" />
+    <ProjectReference Include="..\..\Modules\Tenancy\PeopleFlow.Modules.Tenancy.Contracts\PeopleFlow.Modules.Tenancy.Contracts.csproj" />
+    <ProjectReference Include="..\..\Modules\Tenancy\PeopleFlow.Modules.Tenancy.Core\PeopleFlow.Modules.Tenancy.Core.csproj" />
+    <ProjectReference Include="..\..\Modules\Subscription\PeopleFlow.Modules.Subscription.Contracts\PeopleFlow.Modules.Subscription.Contracts.csproj" />
+    <ProjectReference Include="..\..\Modules\Subscription\PeopleFlow.Modules.Subscription.Core\PeopleFlow.Modules.Subscription.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

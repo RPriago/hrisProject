@@ -3,6 +3,7 @@ using Amazon.Runtime;
 using Amazon.S3;
 using Hangfire;
 using Hangfire.PostgreSql;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,11 +16,20 @@ using PeopleFlow.Jobs.Filters;
 using PeopleFlow.Jobs.Services;
 using PeopleFlow.Jobs.Tracker;
 using PeopleFlow.Kernel.Time;
+using PeopleFlow.Modules.Identity.Core;
+using PeopleFlow.Modules.Identity.Core.Persistence;
+using PeopleFlow.Modules.Subscription.Core;
+using PeopleFlow.Modules.Subscription.Core.Jobs;
+using PeopleFlow.Modules.Subscription.Core.Persistence;
+using PeopleFlow.Modules.Tenancy.Core;
+using PeopleFlow.Modules.Tenancy.Core.Jobs;
+using PeopleFlow.Modules.Tenancy.Core.Persistence;
 using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.MultiTenancy.Interceptors;
 using PeopleFlow.Persistence.Audit;
 using PeopleFlow.Persistence.Context;
+using PeopleFlow.Persistence.DataProtection;
 using PeopleFlow.Persistence.Idempotency;
 using PeopleFlow.Persistence.Outbox;
 using PeopleFlow.Security.Authorization;
@@ -73,6 +83,20 @@ public class HangfireServerHostedService : IHostedService
         }
         _logger.LogInformation("Starting Hangfire server listening on queues: {Queues}", string.Join(", ", _options.Queues));
         _server = new BackgroundJobServer(_options);
+
+        RecurringJob.AddOrUpdate<SubscriptionLifecycleSweepJob>(
+            "modul02-subscription-lifecycle-sweep",
+            job => job.ExecuteAsync(CancellationToken.None),
+            "0 * * * *");
+        RecurringJob.AddOrUpdate<ExpiredAccessCleanupJob>(
+            "modul02-expired-access-cleanup",
+            job => job.ExecuteAsync(CancellationToken.None),
+            "*/30 * * * *");
+        RecurringJob.AddOrUpdate<BillingWebhookRetryJob>(
+            "modul02-billing-webhook-retry",
+            job => job.ExecuteAsync(CancellationToken.None),
+            "*/5 * * * *");
+
         return Task.CompletedTask;
     }
 
@@ -195,11 +219,44 @@ public class Program
                 services.AddScoped<IIdempotencyService, IdempotencyService>();
                 services.AddScoped<IOutboxPublisher, OutboxPublisher>();
                 services.AddScoped<IAuditLogWriter, OutboxAuditLogWriter>();
+                services.AddScoped<IPlatformAuditLogWriter, PlatformAuditLogWriter>();
                 services.AddScoped<IJobProgressTracker, JobProgressTracker>();
+                var dpBuilder = services.AddDataProtection()
+                    .SetApplicationName("PeopleFlow")
+                    .PersistKeysToPeopleFlowDbContext();
+                var dpCert = DataProtectionCertificateLoader.TryLoadFromConfiguration(hostContext.Configuration);
+                if (dpCert != null)
+                {
+                    dpBuilder.ProtectKeysWithCertificate(dpCert);
+                }
+                services.AddSubscriptionModule(hostContext.Configuration);
+                services.AddIdentityModule();
+                services.AddTenancyModule();
                 services.AddSingleton<IBackgroundJobClient>(_ => new BackgroundJobClient(JobStorage.Current));
                 services.AddScoped<IBackgroundJobService, HangfireBackgroundJobService>();
 
                 services.AddDbContext<PeopleFlowDbContext>((sp, options) =>
+                {
+                    var accessor = sp.GetRequiredService<ITenantContextAccessor>();
+                    options.UseNpgsql(connectionString)
+                           .AddInterceptors(new NpgsqlTenantRlsInterceptor(accessor));
+                });
+
+                services.AddDbContext<SubscriptionDbContext>((sp, options) =>
+                {
+                    var accessor = sp.GetRequiredService<ITenantContextAccessor>();
+                    options.UseNpgsql(connectionString)
+                           .AddInterceptors(new NpgsqlTenantRlsInterceptor(accessor));
+                });
+
+                services.AddDbContext<IdentityDbContext>((sp, options) =>
+                {
+                    var accessor = sp.GetRequiredService<ITenantContextAccessor>();
+                    options.UseNpgsql(connectionString)
+                           .AddInterceptors(new NpgsqlTenantRlsInterceptor(accessor));
+                });
+
+                services.AddDbContext<TenancyDbContext>((sp, options) =>
                 {
                     var accessor = sp.GetRequiredService<ITenantContextAccessor>();
                     options.UseNpgsql(connectionString)

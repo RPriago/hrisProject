@@ -26,4 +26,10 @@ public interface IOutboxPublisher
         Guid? tenantId = null,
         bool autoSave = false,
         CancellationToken cancellationToken = default);
+
+    Task<OutboxMessage> PublishPlatformAsync(
+        string messageType,
+        string payloadJson,
+        Guid? correlationId = null,
+        CancellationToken cancellationToken = default);
 }

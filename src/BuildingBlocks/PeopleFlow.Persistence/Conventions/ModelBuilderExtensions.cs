@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using PeopleFlow.Kernel.Domain;
+using PeopleFlow.Persistence.Audit;
 using PeopleFlow.Persistence.Context;
 using PeopleFlow.Persistence.Entities;
 
@@ -42,6 +43,11 @@ public static class ModelBuilderExtensions
 
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
         {
+            if (typeof(IPlatformOwnedEntity).IsAssignableFrom(entityType.ClrType))
+            {
+                continue;
+            }
+
             var tenantProp = entityType.FindProperty("TenantId");
             if (tenantProp == null) continue;
 
@@ -189,6 +195,20 @@ public static class ModelBuilderExtensions
             b.UseXminAsConcurrencyToken();
         });
 
+        // 6. PlatformAuditLog (append-only global/platform security audit trail)
+        modelBuilder.Entity<PlatformAuditLog>(b =>
+        {
+            b.ToTable("infra_platform_audit_logs");
+            b.HasKey(e => e.Id);
+            b.Property(e => e.ActorRole).HasMaxLength(64).IsRequired();
+            b.Property(e => e.Action).HasMaxLength(120).IsRequired();
+            b.Property(e => e.ResourcePath).HasMaxLength(256).IsRequired();
+            b.Property(e => e.Reason).HasMaxLength(500);
+            b.Property(e => e.MetadataJson).HasColumnType("jsonb");
+            b.HasIndex(e => new { e.TargetTenantId, e.OccurredAtUtc });
+            b.UseXminAsConcurrencyToken();
+        });
+
         return modelBuilder;
     }
 
@@ -251,6 +271,11 @@ public static class ModelBuilderExtensions
 
         foreach (var entityType in model.GetEntityTypes())
         {
+            if (typeof(IPlatformOwnedEntity).IsAssignableFrom(entityType.ClrType))
+            {
+                continue;
+            }
+
             var tenantProp = entityType.FindProperty("TenantId");
             if (tenantProp == null) continue;
 

@@ -8,6 +8,7 @@ using Hangfire;
 using Hangfire.Common;
 using Hangfire.PostgreSql;
 using Hangfire.States;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
@@ -23,6 +24,12 @@ using PeopleFlow.Jobs.Configuration;
 using PeopleFlow.Jobs.Services;
 using PeopleFlow.Jobs.Tracker;
 using PeopleFlow.Kernel.Time;
+using PeopleFlow.Modules.Identity.Core;
+using PeopleFlow.Modules.Identity.Core.Persistence;
+using PeopleFlow.Modules.Subscription.Core;
+using PeopleFlow.Modules.Subscription.Core.Persistence;
+using PeopleFlow.Modules.Tenancy.Core;
+using PeopleFlow.Modules.Tenancy.Core.Persistence;
 using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.MultiTenancy.Interceptors;
@@ -43,6 +50,7 @@ using PeopleFlow.Storage.Jobs;
 using PeopleFlow.Storage.Sanitization;
 using PeopleFlow.Storage.Services;
 using PeopleFlow.Web.Middleware;
+using PeopleFlow.Web.Security;
 using Serilog.Core;
 
 namespace PeopleFlow.Web;
@@ -97,6 +105,12 @@ public partial class Program
                 cookieOptions.Cookie.Path = "/";
                 cookieOptions.ExpireTimeSpan = TimeSpan.FromHours(8);
                 cookieOptions.SlidingExpiration = false;
+                cookieOptions.ForwardDefaultSelector = ctx =>
+                    ctx.Request.Headers.ContainsKey("X-API-Key") ||
+                    (ctx.Request.Headers.Authorization.FirstOrDefault() is { } authHeader &&
+                     authHeader.StartsWith("Bearer pfi_", StringComparison.OrdinalIgnoreCase))
+                        ? ApiClientAuthenticationHandler.SchemeName
+                        : null;
                 cookieOptions.Events = new CookieAuthenticationEvents
                 {
                     OnRedirectToLogin = ctx => WriteAuthProblemAsync(
@@ -110,10 +124,13 @@ public partial class Program
                         "FORBIDDEN",
                         "You do not have permission to access this resource.")
                 };
-            });
+            })
+            .AddScheme<AuthenticationSchemeOptions, ApiClientAuthenticationHandler>(
+                ApiClientAuthenticationHandler.SchemeName,
+                _ => { });
         builder.Services.AddAuthorization();
 
-        builder.Services.AddSingleton<IClock, SystemClock>();
+        builder.Services.AddSingleton<IClock, PeopleFlow.Kernel.Time.SystemClock>();
         builder.Services.AddSingleton<ITenantContextAccessor, AsyncLocalTenantContextAccessor>();
         builder.Services.AddSingleton<ICurrentActorContext, AsyncLocalCurrentActorContext>();
         builder.Services.AddSingleton<IAuthorizationGuard, FourTierAuthorizationPipeline>();
@@ -136,6 +153,10 @@ public partial class Program
                 "/api/v1/auth/csrf",
                 "/healthz",
                 "/api/v1/test/unhandled-error"
+            },
+            ExemptPathPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "/api/v1/webhooks/billing/"
             }
         };
         builder.Services.AddSingleton(csrfValidationOptions);
@@ -143,20 +164,24 @@ public partial class Program
         builder.Services.Configure<ForwardedHeadersOptions>(forwardedOptions =>
         {
             forwardedOptions.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-            forwardedOptions.ForwardLimit = 1;
+            forwardedOptions.ForwardLimit = builder.Configuration.GetValue<int?>("Security:ForwardedHeaders:ForwardLimit") is { } limit && limit > 0
+                ? limit
+                : 1;
             forwardedOptions.KnownNetworks.Clear();
             forwardedOptions.KnownProxies.Clear();
 
-            var knownProxies = builder.Configuration.GetSection("Security:ForwardedHeaders:KnownProxies").Get<string[]>() ?? Array.Empty<string>();
+            var knownProxies = (builder.Configuration.GetSection("Security:ForwardedHeaders:KnownProxies").Get<string[]>() ?? Array.Empty<string>())
+                .Concat(builder.Configuration.GetSection("Security:ForwardedHeaders:KnownNetworks").Get<string[]>() ?? Array.Empty<string>());
             foreach (var rawProxy in knownProxies)
             {
                 if (string.IsNullOrWhiteSpace(rawProxy)) continue;
 
-                if (rawProxy.Contains('/') && System.Net.IPNetwork.TryParse(rawProxy, out var network))
+                var trimmed = rawProxy.Trim();
+                if (trimmed.Contains('/') && System.Net.IPNetwork.TryParse(trimmed, out var network))
                 {
                     forwardedOptions.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(network.BaseAddress, network.PrefixLength));
                 }
-                else if (IPAddress.TryParse(rawProxy, out var proxyIp))
+                else if (IPAddress.TryParse(trimmed, out var proxyIp))
                 {
                     forwardedOptions.KnownProxies.Add(proxyIp);
                 }
@@ -218,6 +243,10 @@ public partial class Program
         builder.Services.AddScoped<IOutboxPublisher, OutboxPublisher>();
         builder.Services.AddScoped<IAuditLogWriter, OutboxAuditLogWriter>();
         builder.Services.AddScoped<IJobProgressTracker, JobProgressTracker>();
+        builder.Services.AddScoped<IPlatformAuditLogWriter, PlatformAuditLogWriter>();
+        builder.Services.AddSubscriptionModule(builder.Configuration);
+        builder.Services.AddIdentityModule();
+        builder.Services.AddTenancyModule();
 
         if (configureServices != null)
         {
@@ -239,6 +268,27 @@ public partial class Program
             }
 
             builder.Services.AddDbContext<PeopleFlowDbContext>((sp, options) =>
+            {
+                var accessor = sp.GetRequiredService<ITenantContextAccessor>();
+                options.UseNpgsql(connectionString)
+                       .AddInterceptors(new NpgsqlTenantRlsInterceptor(accessor));
+            });
+
+            builder.Services.AddDbContext<SubscriptionDbContext>((sp, options) =>
+            {
+                var accessor = sp.GetRequiredService<ITenantContextAccessor>();
+                options.UseNpgsql(connectionString)
+                       .AddInterceptors(new NpgsqlTenantRlsInterceptor(accessor));
+            });
+
+            builder.Services.AddDbContext<IdentityDbContext>((sp, options) =>
+            {
+                var accessor = sp.GetRequiredService<ITenantContextAccessor>();
+                options.UseNpgsql(connectionString)
+                       .AddInterceptors(new NpgsqlTenantRlsInterceptor(accessor));
+            });
+
+            builder.Services.AddDbContext<TenancyDbContext>((sp, options) =>
             {
                 var accessor = sp.GetRequiredService<ITenantContextAccessor>();
                 options.UseNpgsql(connectionString)
@@ -302,6 +352,31 @@ public partial class Program
                         QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                         AutoReplenishment = true
                     }));
+
+            var authLimit = builder.Environment.IsEnvironment("Testing") ? 200 : 10;
+            options.AddPolicy("auth-login", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = authLimit,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        AutoReplenishment = true
+                    }));
+
+            options.AddPolicy("auth-mfa", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = authLimit,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        AutoReplenishment = true
+                    }));
         });
 
         builder.Services.AddRuntimeLogRedaction();
@@ -325,10 +400,10 @@ public partial class Program
         app.UseRateLimiter();
 
         app.UseAuthentication();
-        app.UseAuthorization();
 
         app.UseMiddleware<CsrfValidationMiddleware>();
         app.UseMiddleware<TenantResolutionMiddleware>();
+        app.UseAuthorization();
 
         // Guard test-only simulation routes so they are never exposed in Production
         if (app.Environment.IsDevelopment() || app.Environment.IsEnvironment("Testing"))

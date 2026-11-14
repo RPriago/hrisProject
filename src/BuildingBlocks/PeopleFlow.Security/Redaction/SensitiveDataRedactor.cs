@@ -1,4 +1,6 @@
 using System.Collections;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace PeopleFlow.Security.Redaction;
@@ -265,6 +267,93 @@ public static partial class SensitiveDataRedactor
     }
 
     public static string Mask => DefaultMask;
+
+    /// <summary>
+    /// Redacts sensitive keys, inline secrets, and emails from JSON payloads while optionally
+    /// keeping pre-allowlisted properties (such as DataProtection-encrypted outbox tokens) intact.
+    /// </summary>
+    public static string RedactJson(string? json, IReadOnlySet<string>? preserveProperties = null)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return "{}";
+        }
+
+        try
+        {
+            var node = JsonNode.Parse(json);
+            if (node is null)
+            {
+                return "{}";
+            }
+
+            return SanitizeJsonNode(node, preserveProperties, 0)?.ToJsonString() ?? "{}";
+        }
+        catch (JsonException)
+        {
+            return JsonSerializer.Serialize(new { rawRedacted = RedactSecretsFromText(json) });
+        }
+    }
+
+    private static JsonNode? SanitizeJsonNode(JsonNode? node, IReadOnlySet<string>? preserveProperties, int depth)
+    {
+        if (node is null)
+        {
+            return null;
+        }
+
+        if (depth >= 12)
+        {
+            return JsonValue.Create("[Truncated]");
+        }
+
+        if (node is JsonObject obj)
+        {
+            var sanitized = new JsonObject();
+            foreach (var kv in obj)
+            {
+                if (preserveProperties != null &&
+                    preserveProperties.Contains(kv.Key) &&
+                    kv.Value is JsonValue preservedVal &&
+                    preservedVal.TryGetValue<string>(out var rawPreserved))
+                {
+                    sanitized[kv.Key] = JsonValue.Create(rawPreserved);
+                    continue;
+                }
+
+                sanitized[kv.Key] = IsSensitiveName(kv.Key)
+                    ? JsonValue.Create(DefaultMask)
+                    : SanitizeJsonNode(kv.Value, preserveProperties, depth + 1);
+            }
+
+            return sanitized;
+        }
+
+        if (node is JsonArray arr)
+        {
+            var sanitized = new JsonArray();
+            var count = 0;
+            foreach (var item in arr)
+            {
+                if (count++ >= 100)
+                {
+                    sanitized.Add(JsonValue.Create("[Truncated]"));
+                    break;
+                }
+
+                sanitized.Add(SanitizeJsonNode(item, preserveProperties, depth + 1));
+            }
+
+            return sanitized;
+        }
+
+        if (node is JsonValue scalar && scalar.TryGetValue<string>(out var text))
+        {
+            return JsonValue.Create(RedactSecretsFromText(text));
+        }
+
+        return node.DeepClone();
+    }
 
     [GeneratedRegex(@"(?i)\b(Password|Pwd|Secret|ApiKey|AccessKey|PrivateKey|Token|Passphrase|Email|Nik|Ktp|Npwp|Salary|BankAccount)\s*=\s*([^;\s,'""]+)", RegexOptions.CultureInvariant)]
     private static partial Regex ConnectionStringSecretRegex();

@@ -69,7 +69,8 @@ public sealed record EvaluationSubject(
     DataScope? GrantedScope = null,
     bool IsTargetWithinScope = true,
     Guid? ActorScopeUnitId = null,
-    Guid? TargetScopeUnitId = null)
+    Guid? TargetScopeUnitId = null,
+    bool IsReadOnlyRole = false)
 {
     public static readonly EvaluationSubject Empty = new();
 }

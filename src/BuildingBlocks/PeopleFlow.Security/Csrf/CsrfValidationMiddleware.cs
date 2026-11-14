@@ -12,6 +12,7 @@ public sealed class CsrfValidationOptions
     public string HeaderName { get; set; } = "X-CSRF-Token";
     public string CookieName { get; set; } = SessionCookieConfig.CookieName;
     public ISet<string> ExemptPaths { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    public ISet<string> ExemptPathPrefixes { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed class CsrfValidationMiddleware
@@ -38,7 +39,19 @@ public sealed class CsrfValidationMiddleware
             return;
         }
 
-        if (_options.ExemptPaths.Contains(context.Request.Path.Value ?? string.Empty))
+        var requestPath = context.Request.Path.Value ?? string.Empty;
+        if (_options.ExemptPaths.Contains(requestPath) ||
+            _options.ExemptPathPrefixes.Any(prefix => requestPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+        {
+            await _next(context);
+            return;
+        }
+
+        var hasSessionCookie = context.Request.Cookies.TryGetValue(_options.CookieName, out var sessionId) &&
+            !string.IsNullOrWhiteSpace(sessionId);
+
+        // Stateless API/Bearer token requests without a browser session cookie do not carry ambient credentials
+        if (!hasSessionCookie && IsStatelessTokenAuthenticated(context))
         {
             await _next(context);
             return;
@@ -52,9 +65,6 @@ public sealed class CsrfValidationMiddleware
         }
 
         // 2. Cookie Session Anti-CSRF Token Verification
-        var hasSessionCookie = context.Request.Cookies.TryGetValue(_options.CookieName, out var sessionId) &&
-            !string.IsNullOrWhiteSpace(sessionId);
-
         if (hasSessionCookie)
         {
             if (!context.Request.Headers.TryGetValue(_options.HeaderName, out var tokenValues) ||
@@ -71,7 +81,7 @@ public sealed class CsrfValidationMiddleware
                 return;
             }
         }
-        else if (_options.RequireTokenWhenSessionCookieAbsent && !IsStatelessBearerAuthenticated(context))
+        else if (_options.RequireTokenWhenSessionCookieAbsent && !IsStatelessTokenAuthenticated(context))
         {
             await RejectAsync(context, "CSRF_TOKEN_MISSING", "Anti-CSRF session cookie and 'X-CSRF-Token' header are required for mutating requests.");
             return;
@@ -80,9 +90,10 @@ public sealed class CsrfValidationMiddleware
         await _next(context);
     }
 
-    private static bool IsStatelessBearerAuthenticated(HttpContext context) =>
+    private static bool IsStatelessTokenAuthenticated(HttpContext context) =>
         context.User.Identity?.IsAuthenticated == true &&
-        string.Equals(context.User.Identity.AuthenticationType, "Bearer", StringComparison.OrdinalIgnoreCase);
+        (string.Equals(context.User.Identity.AuthenticationType, "Bearer", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(context.User.Identity.AuthenticationType, "ApiClient", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsSafeMethod(string method)
     {

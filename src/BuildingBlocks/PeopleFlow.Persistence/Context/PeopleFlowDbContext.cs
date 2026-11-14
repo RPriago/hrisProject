@@ -5,6 +5,7 @@ using PeopleFlow.Kernel.Time;
 using PeopleFlow.MultiTenancy.Abstractions;
 using PeopleFlow.MultiTenancy.Context;
 using PeopleFlow.MultiTenancy.Interceptors;
+using PeopleFlow.Persistence.Audit;
 using PeopleFlow.Persistence.Conventions;
 using PeopleFlow.Persistence.Entities;
 using PeopleFlow.Security.Context;
@@ -72,9 +73,19 @@ public class PeopleFlowDbContext : DbContext
     public DbSet<BackgroundJobRun> BackgroundJobRuns => Set<BackgroundJobRun>();
     public DbSet<StoredFile> StoredFiles => Set<StoredFile>();
     public DbSet<DataProtectionKeyRecord> DataProtectionKeys => Set<DataProtectionKeyRecord>();
+    public DbSet<PlatformAuditLog> PlatformAuditLogs => Set<PlatformAuditLog>();
 
     public PeopleFlowDbContext(
         DbContextOptions<PeopleFlowDbContext> options,
+        ITenantContextAccessor? tenantContextAccessor = null,
+        IClock? clock = null,
+        ICurrentActorContext? currentActorContext = null)
+        : this((DbContextOptions)options, tenantContextAccessor, clock, currentActorContext)
+    {
+    }
+
+    protected PeopleFlowDbContext(
+        DbContextOptions options,
         ITenantContextAccessor? tenantContextAccessor = null,
         IClock? clock = null,
         ICurrentActorContext? currentActorContext = null)
@@ -113,7 +124,19 @@ public class PeopleFlowDbContext : DbContext
 
         ConfigureModuleModels(modelBuilder);
 
-        modelBuilder.ApplyInfrastructureEntityConfigurations();
+        if (GetType() == typeof(PeopleFlowDbContext))
+        {
+            modelBuilder.ApplyInfrastructureEntityConfigurations();
+        }
+        else
+        {
+            modelBuilder.Ignore<IdempotencyRecord>();
+            modelBuilder.Ignore<OutboxMessage>();
+            modelBuilder.Ignore<BackgroundJobRun>();
+            modelBuilder.Ignore<StoredFile>();
+            modelBuilder.Ignore<DataProtectionKeyRecord>();
+            modelBuilder.Ignore<PlatformAuditLog>();
+        }
         modelBuilder.ApplyConcurrencyTokens();
         modelBuilder.ApplyTenantQueryFilters(this);
         modelBuilder.ApplySnakeCaseNamingConvention();
@@ -164,6 +187,11 @@ public class PeopleFlowDbContext : DbContext
                 {
                     incMethod.Invoke(entry.Entity, null);
                 }
+            }
+
+            if (entry.Entity is IPlatformOwnedEntity)
+            {
+                continue;
             }
 
             var tenantProp = entry.Properties.FirstOrDefault(p => p.Metadata.Name == "TenantId");

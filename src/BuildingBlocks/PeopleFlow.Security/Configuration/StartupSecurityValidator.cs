@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -99,6 +100,36 @@ public static class StartupSecurityValidator
                 throw new InvalidOperationException(
                     $"Security:Csrf:AllowedOrigins contains insecure or local origin '{origin}' in non-development environment.");
             }
+        }
+
+        ValidateForwardedHeadersConfiguration(configuration);
+    }
+
+    private static void ValidateForwardedHeadersConfiguration(IConfiguration configuration)
+    {
+        var allowDirect = configuration.GetValue<bool>("Security:ForwardedHeaders:AllowDirectInternetWithoutProxy");
+        var proxyEntries = (configuration.GetSection("Security:ForwardedHeaders:KnownProxies").Get<string[]>() ?? Array.Empty<string>())
+            .Concat(configuration.GetSection("Security:ForwardedHeaders:KnownNetworks").Get<string[]>() ?? Array.Empty<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim())
+            .ToArray();
+
+        foreach (var entry in proxyEntries)
+        {
+            var isValid = entry.Contains('/')
+                ? IPNetwork.TryParse(entry, out _)
+                : IPAddress.TryParse(entry, out _);
+            if (!isValid)
+            {
+                throw new InvalidOperationException(
+                    $"Security:ForwardedHeaders contains invalid IP or CIDR entry '{entry}'.");
+            }
+        }
+
+        if (proxyEntries.Length == 0 && !allowDirect)
+        {
+            throw new InvalidOperationException(
+                "Security:ForwardedHeaders:KnownProxies (or KnownNetworks) must specify at least one trusted proxy/CIDR, or Security:ForwardedHeaders:AllowDirectInternetWithoutProxy must be set to true in non-development environments.");
         }
     }
 

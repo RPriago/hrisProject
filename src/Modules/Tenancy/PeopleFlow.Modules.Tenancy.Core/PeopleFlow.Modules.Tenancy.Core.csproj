@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PeopleFlow.Modules.Tenancy.Contracts\PeopleFlow.Modules.Tenancy.Contracts.csproj" />
+    <ProjectReference Include="..\..\Identity\PeopleFlow.Modules.Identity.Contracts\PeopleFlow.Modules.Identity.Contracts.csproj" />
+    <ProjectReference Include="..\..\Subscription\PeopleFlow.Modules.Subscription.Contracts\PeopleFlow.Modules.Subscription.Contracts.csproj" />
+    <ProjectReference Include="..\..\..\BuildingBlocks\PeopleFlow.Kernel\PeopleFlow.Kernel.csproj" />
+    <ProjectReference Include="..\..\..\BuildingBlocks\PeopleFlow.MultiTenancy\PeopleFlow.MultiTenancy.csproj" />
+    <ProjectReference Include="..\..\..\BuildingBlocks\PeopleFlow.Persistence\PeopleFlow.Persistence.csproj" />
+    <ProjectReference Include="..\..\..\BuildingBlocks\PeopleFlow.Security\PeopleFlow.Security.csproj" />
+    <ProjectReference Include="..\..\..\BuildingBlocks\PeopleFlow.Jobs\PeopleFlow.Jobs.csproj" />
+  </ItemGroup>
+
+</Project>

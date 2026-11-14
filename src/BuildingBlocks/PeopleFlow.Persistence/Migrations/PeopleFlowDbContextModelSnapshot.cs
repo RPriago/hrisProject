@@ -328,6 +328,90 @@ public partial class PeopleFlowDbContextModelSnapshot : ModelSnapshot
             b.ToTable("infra_outbox_messages", (string)null);
         });
 
+        modelBuilder.Entity("PeopleFlow.Persistence.Audit.PlatformAuditLog", b =>
+        {
+            b.Property<Guid>("Id")
+                .ValueGeneratedOnAdd()
+                .HasColumnType("uuid")
+                .HasColumnName("id");
+
+            b.Property<string>("Action")
+                .IsRequired()
+                .HasMaxLength(120)
+                .HasColumnType("character varying(120)")
+                .HasColumnName("action");
+
+            b.Property<string>("ActorRole")
+                .IsRequired()
+                .HasMaxLength(64)
+                .HasColumnType("character varying(64)")
+                .HasColumnName("actor_role");
+
+            b.Property<Guid?>("ActorUserId")
+                .HasColumnType("uuid")
+                .HasColumnName("actor_user_id");
+
+            b.Property<Guid>("CorrelationId")
+                .HasColumnType("uuid")
+                .HasColumnName("correlation_id");
+
+            b.Property<DateTimeOffset>("CreatedAtUtc")
+                .HasColumnType("timestamp with time zone")
+                .HasColumnName("created_at_utc");
+
+            b.Property<Guid?>("CreatedBy")
+                .HasColumnType("uuid")
+                .HasColumnName("created_by");
+
+            b.Property<string>("MetadataJson")
+                .HasColumnType("jsonb")
+                .HasColumnName("metadata_json");
+
+            b.Property<DateTimeOffset>("OccurredAtUtc")
+                .HasColumnType("timestamp with time zone")
+                .HasColumnName("occurred_at_utc");
+
+            b.Property<string>("Reason")
+                .HasMaxLength(500)
+                .HasColumnType("character varying(500)")
+                .HasColumnName("reason");
+
+            b.Property<string>("ResourcePath")
+                .IsRequired()
+                .HasMaxLength(256)
+                .HasColumnType("character varying(256)")
+                .HasColumnName("resource_path");
+
+            b.Property<Guid?>("SupportGrantId")
+                .HasColumnType("uuid")
+                .HasColumnName("support_grant_id");
+
+            b.Property<Guid?>("TargetTenantId")
+                .HasColumnType("uuid")
+                .HasColumnName("target_tenant_id");
+
+            b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                .HasColumnType("timestamp with time zone")
+                .HasColumnName("updated_at_utc");
+
+            b.Property<Guid?>("UpdatedBy")
+                .HasColumnType("uuid")
+                .HasColumnName("updated_by");
+
+            b.Property<uint>("xmin")
+                .IsConcurrencyToken()
+                .ValueGeneratedOnAddOrUpdate()
+                .HasColumnType("xid")
+                .HasColumnName("xmin")
+                .HasDefaultValue(0u);
+
+            b.HasKey("Id");
+
+            b.HasIndex("TargetTenantId", "OccurredAtUtc");
+
+            b.ToTable("infra_platform_audit_logs", (string)null);
+        });
+
         modelBuilder.Entity("PeopleFlow.Persistence.Entities.StoredFile", b =>
         {
             b.Property<Guid>("Id")

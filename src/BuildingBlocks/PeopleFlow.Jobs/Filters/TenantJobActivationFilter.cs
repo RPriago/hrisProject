@@ -39,6 +39,33 @@ public sealed class TenantJobActivationFilter : JobFilterAttribute, IServerFilte
     {
         ArgumentNullException.ThrowIfNull(filterContext);
 
+        var method = filterContext.BackgroundJob?.Job?.Method;
+        var isPlatformJob = method != null &&
+            (method.IsDefined(typeof(PlatformSystemJobAttribute), inherit: true) ||
+             (method.DeclaringType?.IsDefined(typeof(PlatformSystemJobAttribute), inherit: true) ?? false));
+
+        if (isPlatformJob)
+        {
+            var platformArgs = filterContext.BackgroundJob?.Job?.Args;
+            if (platformArgs != null)
+            {
+                foreach (var arg in platformArgs)
+                {
+                    if (arg is CancellationToken || arg is IJobCancellationToken || arg is PerformContext || arg is PlatformJobEnvelope)
+                    {
+                        continue;
+                    }
+
+                    CancelAndClear(filterContext);
+                    return;
+                }
+            }
+
+            _tenantContextAccessor.Clear();
+            _currentActorContext?.Clear();
+            return;
+        }
+
         JobEnvelope? envelope = null;
         var args = filterContext.BackgroundJob?.Job?.Args;
 
